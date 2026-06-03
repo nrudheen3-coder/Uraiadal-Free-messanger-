@@ -2,14 +2,10 @@
   "name": "uraiadal",
   "version": "1.0.0",
   "private": true,
-  "description": "Private E2EE messenger — no phone, no email, just your keypair",
   "scripts": {
-    "dev":   "cd apps/web && npm run dev",
-    "build": "cd apps/web && npm run build"
-  },
-  "repository": {
-    "type": "git",
-    "url":  "https://github.com/NAZRUDH/uraiadal"
+    "build": "cd apps/web && npm install && npm run build",
+    "dev": "cd apps/web && npm run dev"
   },
   "license": "AGPL-3.0"
 }
+
