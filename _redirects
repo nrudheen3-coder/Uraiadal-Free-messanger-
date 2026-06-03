@@ -1,0 +1,12 @@
+# Cloudflare Pages config
+# This file tells Cloudflare how to build and deploy the app
+
+[build]
+  command     = "cd apps/web && npm install && npm run build"
+  output      = "apps/web/dist"
+  environment = { NODE_VERSION = "20" }
+
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
