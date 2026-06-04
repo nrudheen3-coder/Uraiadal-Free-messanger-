@@ -1,18 +1,14 @@
 /**
- * Uraiadal Relay Worker
- * Cloudflare Durable Objects — real-time WebSocket relay
- * Zero-knowledge: server never reads message content
- *
- * Deploy: wrangler deploy (on Cloudflare build server)
+ * Uraiadal Relay Worker v2
+ * Uses KV polling + WebSocket hybrid
+ * Works 100% on Cloudflare free plan
  */
 
-// ── Durable Object: one instance per user ────────────────────────────────────
 export class UserSession {
   constructor(state, env) {
-    this.state = state;
-    this.env   = env;
-    this.ws    = null;  // active WebSocket connection
-    this.id    = null;  // user's shortId
+    this.state   = state;
+    this.env     = env;
+    this.sessions = new Map(); // wsId → WebSocket
   }
 
   async fetch(request) {
@@ -22,9 +18,8 @@ export class UserSession {
       return this.handleWebSocket(request, url);
     }
 
-    // Deliver a message to this user (called by sender's DO)
     if (url.pathname === "/deliver" && request.method === "POST") {
-      return this.deliverMessage(request);
+      return this.deliver(request);
     }
 
     return new Response("Not found", { status: 404 });
@@ -32,155 +27,151 @@ export class UserSession {
 
   async handleWebSocket(request, url) {
     const shortId = url.searchParams.get("id");
-    if (!shortId || !shortId.startsWith("urai_")) {
+    if (!shortId?.startsWith("urai_")) {
       return new Response("Invalid ID", { status: 400 });
     }
 
-    this.id = shortId;
-
     const [client, server] = Object.values(new WebSocketPair());
-    server.accept();
-    this.ws = server;
+    this.state.acceptWebSocket(server, [shortId]);
 
-    // Register this user as online in KV
+    // Mark user online
     await this.env.REGISTRY.put(
       `online:${shortId}`,
       JSON.stringify({ shortId, lastSeen: Date.now() }),
-      { expirationTtl: 60 } // 60s TTL — refreshed by heartbeat
+      { expirationTtl: 120 }
     );
 
-    server.addEventListener("message", async (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        await this.handleMessage(data);
-      } catch (e) {
-        server.send(JSON.stringify({ type: "error", message: "Invalid message" }));
+    // Deliver any pending offline messages immediately
+    const pending = await this.env.REGISTRY.list({ prefix: `msg:${shortId}:` });
+    for (const key of pending.keys) {
+      const val = await this.env.REGISTRY.get(key.name);
+      if (val) {
+        server.send(val);
+        await this.env.REGISTRY.delete(key.name);
       }
-    });
-
-    server.addEventListener("close", async () => {
-      await this.env.REGISTRY.delete(`online:${shortId}`);
-      this.ws = null;
-    });
-
-    server.addEventListener("error", () => {
-      this.ws = null;
-    });
+    }
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async handleMessage(data) {
+  // Called when message received from WebSocket
+  async webSocketMessage(ws, message) {
+    const tags   = this.state.getTags(ws);
+    const fromId = tags[0];
+    if (!fromId) return;
+
+    let data;
+    try { data = JSON.parse(message); } catch { return; }
+
     const { type } = data;
 
-    if (type === "message") {
-      await this.routeMessage(data);
-    } else if (type === "receipt") {
-      await this.routeReceipt(data);
-    } else if (type === "typing") {
-      await this.routeTyping(data);
-    } else if (type === "heartbeat") {
-      // Refresh online status
-      if (this.id) {
-        await this.env.REGISTRY.put(
-          `online:${this.id}`,
-          JSON.stringify({ shortId: this.id, lastSeen: Date.now() }),
-          { expirationTtl: 60 }
-        );
-        this.ws?.send(JSON.stringify({ type: "heartbeat_ack" }));
-      }
+    if (type === "heartbeat") {
+      await this.env.REGISTRY.put(
+        `online:${fromId}`,
+        JSON.stringify({ shortId: fromId, lastSeen: Date.now() }),
+        { expirationTtl: 120 }
+      );
+      ws.send(JSON.stringify({ type: "heartbeat_ack" }));
+      return;
     }
-  }
 
-  async routeMessage(data) {
-    const { toId, messageId, payload, msgType, timestamp } = data;
-    if (!toId || !messageId || !payload) return;
+    if (type === "message") {
+      const { toId, messageId, payload, msgType, timestamp } = data;
+      if (!toId || !messageId) return;
 
-    // Store message in KV for offline delivery (TTL 7 days)
-    const msgKey = `pending:${toId}:${messageId}`;
-    await this.env.REGISTRY.put(msgKey, JSON.stringify({
-      messageId,
-      fromId: this.id,
-      toId,
-      payload,   // encrypted blob — server cannot read
-      msgType:   msgType || "text",
-      timestamp: timestamp || Date.now(),
-    }), { expirationTtl: 604800 }); // 7 days
-
-    // Try to deliver live if recipient is online
-    const recipientId = this.env.USER_SESSION.idFromName(toId);
-    const recipientDO = this.env.USER_SESSION.get(recipientId);
-
-    try {
-      const res = await recipientDO.fetch("https://relay/deliver", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "message",
-          messageId,
-          fromId: this.id,
-          payload,
-          msgType: msgType || "text",
-          timestamp: timestamp || Date.now(),
-        }),
+      const envelope = JSON.stringify({
+        type:      "message",
+        messageId,
+        fromId,
+        payload,
+        msgType:   msgType || "text",
+        timestamp: timestamp || Date.now(),
       });
 
-      if (res.ok) {
-        // Message delivered live — send delivered receipt to sender
-        this.ws?.send(JSON.stringify({
-          type: "receipt",
-          messageId,
-          status: "delivered",
-        }));
-        // Delete from pending
-        await this.env.REGISTRY.delete(msgKey);
+      // Try live delivery via recipient's Durable Object
+      const recipDO = this.env.USER_SESSION.get(
+        this.env.USER_SESSION.idFromName(toId)
+      );
+
+      let delivered = false;
+      try {
+        const res = await recipDO.fetch(
+          new Request("https://relay/deliver", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: envelope,
+          })
+        );
+        delivered = res.ok && (await res.text()) === "ok";
+      } catch {}
+
+      if (delivered) {
+        // Confirm delivery to sender
+        ws.send(JSON.stringify({ type: "receipt", messageId, status: "delivered" }));
       } else {
-        // Offline — message stored for later
-        this.ws?.send(JSON.stringify({
-          type: "receipt",
-          messageId,
-          status: "sent",
-        }));
+        // Store for offline delivery (7 days TTL)
+        await this.env.REGISTRY.put(
+          `msg:${toId}:${messageId}`,
+          envelope,
+          { expirationTtl: 604800 }
+        );
+        ws.send(JSON.stringify({ type: "receipt", messageId, status: "sent" }));
       }
-    } catch {
-      this.ws?.send(JSON.stringify({
-        type: "receipt",
-        messageId,
-        status: "sent",
-      }));
+    }
+
+    if (type === "receipt") {
+      const { toId, messageId, status } = data;
+      if (!toId) return;
+      const recipDO = this.env.USER_SESSION.get(
+        this.env.USER_SESSION.idFromName(toId)
+      );
+      await recipDO.fetch(new Request("https://relay/deliver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "receipt", messageId, fromId, status }),
+      })).catch(() => {});
+    }
+
+    if (type === "typing") {
+      const { toId, isTyping } = data;
+      if (!toId) return;
+      const recipDO = this.env.USER_SESSION.get(
+        this.env.USER_SESSION.idFromName(toId)
+      );
+      await recipDO.fetch(new Request("https://relay/deliver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "typing", fromId, isTyping }),
+      })).catch(() => {});
     }
   }
 
-  async routeReceipt(data) {
-    const { toId, messageId, status } = data;
-    if (!toId) return;
-    const recipientId = this.env.USER_SESSION.idFromName(toId);
-    const recipientDO = this.env.USER_SESSION.get(recipientId);
-    await recipientDO.fetch("https://relay/deliver", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "receipt", messageId, fromId: this.id, status }),
-    }).catch(() => {});
+  async webSocketClose(ws) {
+    const tags    = this.state.getTags(ws);
+    const shortId = tags[0];
+    if (shortId) {
+      await this.env.REGISTRY.delete(`online:${shortId}`);
+    }
   }
 
-  async routeTyping(data) {
-    const { toId, isTyping } = data;
-    if (!toId) return;
-    const recipientId = this.env.USER_SESSION.idFromName(toId);
-    const recipientDO = this.env.USER_SESSION.get(recipientId);
-    await recipientDO.fetch("https://relay/deliver", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "typing", fromId: this.id, isTyping }),
-    }).catch(() => {});
+  async webSocketError(ws) {
+    const tags    = this.state.getTags(ws);
+    const shortId = tags[0];
+    if (shortId) {
+      await this.env.REGISTRY.delete(`online:${shortId}`);
+    }
   }
 
-  async deliverMessage(request) {
-    if (!this.ws) {
+  // Deliver message to all active WebSockets for this user
+  async deliver(request) {
+    const data = await request.text();
+    const sockets = this.state.getWebSockets();
+    if (sockets.length === 0) {
       return new Response("offline", { status: 503 });
     }
-    const data = await request.json();
-    this.ws.send(JSON.stringify(data));
+    for (const ws of sockets) {
+      try { ws.send(data); } catch {}
+    }
     return new Response("ok");
   }
 }
@@ -190,98 +181,87 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // CORS headers
-    const corsHeaders = {
+    const cors = {
       "Access-Control-Allow-Origin":  "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type",
     };
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { headers: cors });
     }
 
-    // ── WebSocket upgrade → route to user's Durable Object ──
+    const json = (data, status = 200) =>
+      new Response(JSON.stringify(data), {
+        status,
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+
+    // ── WebSocket ──
     if (url.pathname === "/ws") {
       const shortId = url.searchParams.get("id");
-      if (!shortId || !shortId.startsWith("urai_")) {
+      if (!shortId?.startsWith("urai_")) {
         return new Response("Invalid ID", { status: 400 });
       }
       const doId = env.USER_SESSION.idFromName(shortId);
-      const doObj = env.USER_SESSION.get(doId);
-      return doObj.fetch(request);
+      return env.USER_SESSION.get(doId).fetch(request);
     }
 
-    // ── Register user pubkeys ──
+    // ── Register ──
     if (url.pathname === "/register" && request.method === "POST") {
       try {
         const { shortId, signingPubKey, exchangePubKey } = await request.json();
         if (!shortId?.startsWith("urai_")) {
-          return Response.json({ error: "Invalid ID" }, { status: 400, headers: corsHeaders });
+          return json({ error: "Invalid ID" }, 400);
         }
         await env.REGISTRY.put(`user:${shortId}`, JSON.stringify({
-          shortId,
-          signingPubKey,
-          exchangePubKey,
+          shortId, signingPubKey, exchangePubKey,
           registeredAt: Date.now(),
         }));
-        return Response.json({ success: true, shortId }, { headers: corsHeaders });
+        return json({ success: true, shortId });
       } catch {
-        return Response.json({ error: "Bad request" }, { status: 400, headers: corsHeaders });
+        return json({ error: "Bad request" }, 400);
       }
     }
 
-    // ── Lookup user pubkeys ──
-    if (url.pathname.startsWith("/lookup/") && request.method === "GET") {
+    // ── Lookup ──
+    if (url.pathname.startsWith("/lookup/")) {
       const shortId = url.pathname.replace("/lookup/", "");
-      const data = await env.REGISTRY.get(`user:${shortId}`);
-      if (!data) {
-        return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
-      }
-      return Response.json(JSON.parse(data), { headers: corsHeaders });
+      const data    = await env.REGISTRY.get(`user:${shortId}`);
+      if (!data) return json({ error: "Not found" }, 404);
+      return json(JSON.parse(data));
     }
 
-    // ── Get pending offline messages ──
-    if (url.pathname === "/pending" && request.method === "GET") {
+    // ── Pending messages (for polling fallback) ──
+    if (url.pathname === "/pending") {
       const shortId = url.searchParams.get("id");
-      if (!shortId) return Response.json({ messages: [] }, { headers: corsHeaders });
-
-      const list = await env.REGISTRY.list({ prefix: `pending:${shortId}:` });
+      if (!shortId) return json({ messages: [] });
+      const list = await env.REGISTRY.list({ prefix: `msg:${shortId}:` });
       const messages = await Promise.all(
         list.keys.map(async (k) => {
           const val = await env.REGISTRY.get(k.name);
-          return val ? JSON.parse(val) : null;
+          if (val) {
+            await env.REGISTRY.delete(k.name);
+            return JSON.parse(val);
+          }
+          return null;
         })
       );
-
-      // Delete delivered pending messages
-      await Promise.all(list.keys.map(k => env.REGISTRY.delete(k.name)));
-
-      return Response.json({
-        messages: messages.filter(Boolean)
-      }, { headers: corsHeaders });
+      return json({ messages: messages.filter(Boolean) });
     }
 
-    // ── Check online status ──
-    if (url.pathname.startsWith("/online/") && request.method === "GET") {
+    // ── Online status ──
+    if (url.pathname.startsWith("/online/")) {
       const shortId = url.pathname.replace("/online/", "");
-      const data = await env.REGISTRY.get(`online:${shortId}`);
-      return Response.json({
-        online: !!data,
-        lastSeen: data ? JSON.parse(data).lastSeen : null,
-      }, { headers: corsHeaders });
+      const data    = await env.REGISTRY.get(`online:${shortId}`);
+      return json({ online: !!data, lastSeen: data ? JSON.parse(data).lastSeen : null });
     }
 
-    // ── Health check ──
+    // ── Health ──
     if (url.pathname === "/health") {
-      return Response.json({
-        status: "ok",
-        service: "Uraiadal Relay",
-        version: "1.0.0",
-        timestamp: Date.now(),
-      }, { headers: corsHeaders });
+      return json({ status: "ok", service: "Uraiadal Relay", version: "2.0.0", timestamp: Date.now() });
     }
 
-    return new Response("Uraiadal Relay v1.0", { headers: corsHeaders });
+    return new Response("Uraiadal Relay v2.0", { headers: cors });
   }
 };
