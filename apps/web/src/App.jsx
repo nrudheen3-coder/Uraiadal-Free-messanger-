@@ -5,8 +5,8 @@ const APP_VERSION = "1.0.0";
 
 // Cloudflare Workers relay URL
 // Replace with your actual worker URL after deploying workers/relay
-const RELAY_URL = "wss://uraiadal-relay.nrudheen3.workers.dev";
-const API_URL   = "https://uraiadal-relay.nrudheen3.workers.dev";
+const RELAY_URL = "wss://uraiadal-relay.workers.dev";
+const API_URL   = "https://uraiadal-relay.workers.dev";
 
 const DB = {
   get: (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
