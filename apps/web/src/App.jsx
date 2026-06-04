@@ -1,10 +1,29 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 /* ── Storage ─────────────────────────────────────────────────────────────── */
+const APP_VERSION = "1.0.0";
+
+// Cloudflare Workers relay URL
+// Replace with your actual worker URL after deploying workers/relay
+const RELAY_URL = "wss://uraiadal-relay.workers.dev";
+const API_URL   = "https://uraiadal-relay.workers.dev";
+
 const DB = {
   get: (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
   set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
+  clear: () => {
+    ["urai_identity","urai_version"].forEach(k => localStorage.removeItem(k));
+  }
 };
+
+// Clear stale data from old versions
+(()=>{
+  const v = localStorage.getItem("urai_version");
+  if (v !== APP_VERSION) {
+    DB.clear();
+    localStorage.setItem("urai_version", APP_VERSION);
+  }
+})();
 
 /* ── Crypto helpers ──────────────────────────────────────────────────────── */
 function generateKeyPair() {
@@ -15,6 +34,107 @@ function generateKeyPair() {
 function deriveShortId(pub) { return "urai_" + pub.slice(0, 10); }
 
 /* ── Demo data ───────────────────────────────────────────────────────────── */
+// ── WebSocket Manager ────────────────────────────────────────────────────────
+const WS = {
+  socket: null,
+  listeners: {},
+  reconnectTimer: null,
+  reconnectDelay: 1000,
+  shortId: null,
+
+  connect(shortId) {
+    if (this.socket?.readyState === WebSocket.OPEN) return;
+    this.shortId = shortId;
+    try {
+      this.socket = new WebSocket(`${RELAY_URL}/ws?id=${shortId}`);
+      this.socket.onopen    = () => {
+        this.reconnectDelay = 1000;
+        this.emit("status", "online");
+        this.startHeartbeat();
+        this.fetchPending(shortId);
+      };
+      this.socket.onmessage = (e) => {
+        try { this.emit("message", JSON.parse(e.data)); } catch {}
+      };
+      this.socket.onclose   = () => {
+        this.emit("status", "offline");
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
+          this.connect(shortId);
+        }, this.reconnectDelay);
+      };
+      this.socket.onerror   = () => this.socket?.close();
+    } catch(e) {
+      console.warn("[WS] Connection failed:", e.message);
+    }
+  },
+
+  disconnect() {
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.heartbeatTimer);
+    if (this.socket) { this.socket.onclose = null; this.socket.close(); this.socket = null; }
+  },
+
+  send(data) {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(data));
+      return true;
+    }
+    return false;
+  },
+
+  on(event, cb) {
+    if (!this.listeners[event]) this.listeners[event] = [];
+    this.listeners[event].push(cb);
+    return () => { this.listeners[event] = this.listeners[event].filter(f => f !== cb); };
+  },
+
+  emit(event, data) {
+    (this.listeners[event] || []).forEach(cb => cb(data));
+  },
+
+  startHeartbeat() {
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(() => {
+      this.send({ type: "heartbeat" });
+    }, 30000);
+  },
+
+  async fetchPending(shortId) {
+    try {
+      const res = await fetch(`${API_URL}/pending?id=${shortId}`);
+      const { messages } = await res.json();
+      messages?.forEach(msg => this.emit("message", { type: "message", ...msg }));
+    } catch {}
+  },
+
+  async register(identity) {
+    try {
+      await fetch(`${API_URL}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shortId:       identity.shortId,
+          signingPubKey: identity.publicKey,
+          exchangePubKey: identity.publicKey,
+        }),
+      });
+    } catch {}
+  },
+
+  async lookup(shortId) {
+    try {
+      const res = await fetch(`${API_URL}/lookup/${shortId}`);
+      if (res.ok) return res.json();
+    } catch {}
+    return null;
+  },
+
+  isConnected() {
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+};
+
 const CONTACTS = [
   { id:"urai_Rk9mXpQ2Lz", name:"Ravi Kumar",   online:true,  lastSeen:"now",    unread:2, lastMsg:"Da safe ah irukka?",      lastTime:"10:42" },
   { id:"urai_Px7nBwM4Ys", name:"Priya S",       online:false, lastSeen:"2h ago", unread:0, lastMsg:"📷 Photo",                lastTime:"09:15" },
@@ -72,9 +192,9 @@ const I = {
 
 /* ── Shared styles ───────────────────────────────────────────────────────── */
 const S = {
-  screen: { height:"100%", display:"flex", flexDirection:"column", overflow:"hidden", background:"#0A0A0F" },
+  screen: { height:"100%", display:"flex", flexDirection:"column", overflow:"hidden", background:"#0A0A0F", minHeight:0 },
   header: { padding:"12px 16px", background:"#0A0A0F", borderBottom:"1px solid #1A1A2E", display:"flex", alignItems:"center", gap:12, flexShrink:0 },
-  scroll: { flex:1, overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehavior:"contain" },
+  scroll: { flex:1, overflowY:"auto", overflowX:"hidden", WebkitOverflowScrolling:"touch", overscrollBehavior:"contain", minHeight:0 },
   iconBtn:{ width:38, height:38, borderRadius:12, border:"none", cursor:"pointer", background:"transparent", color:"#7B7B9A", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
   input:  { background:"#141420", border:"1px solid #2A2A3E", borderRadius:12, padding:"12px 14px", color:"#F0F0FF", fontSize:14, fontFamily:"'DM Sans',sans-serif", outline:"none", width:"100%", boxSizing:"border-box" },
   card:   { background:"#141420", border:"1px solid #1E1E2E", borderRadius:16, overflow:"hidden" },
@@ -133,7 +253,7 @@ function Tick({ status }) {
 ══════════════════════════════════════════════════════════════════════════ */
 function WelcomeScreen({ onStart, onRestore }) {
   return (
-    <div style={{ ...S.screen, overflowY:"auto" }}>
+    <div style={{ height:"100%", overflowY:"auto", overflowX:"hidden", WebkitOverflowScrolling:"touch", background:"#0A0A0F" }}>
       <div style={{ minHeight:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"48px 28px", position:"relative" }}>
         {/* glow */}
         <div style={{ position:"fixed", top:"20%", left:"50%", transform:"translateX(-50%)", width:300, height:300, borderRadius:"50%", background:"radial-gradient(circle,#6C63FF1A 0%,transparent 70%)", pointerEvents:"none" }} />
@@ -172,19 +292,23 @@ function KeyGenScreen({ onDone }) {
   const steps = ["Generating Ed25519 keypair...","Creating X25519 exchange keys...","Securing keys locally...","Identity ready! 🎉"];
 
   useEffect(()=>{
+    // Generate keypair immediately but save ONLY when animation completes
     const kp = generateKeyPair();
-    DB.set("urai_identity",{ ...kp, shortId:deriveShortId(kp.publicKey), displayName:"You" });
+    const identity = { ...kp, shortId:deriveShortId(kp.publicKey), displayName:"You", createdAt: Date.now() };
     const timers = [
       setTimeout(()=>setStep(1), 700),
       setTimeout(()=>setStep(2), 1400),
       setTimeout(()=>setStep(3), 2100),
-      setTimeout(()=>onDone(),   2800),
+      setTimeout(()=>{
+        DB.set("urai_identity", identity); // save only after full animation
+        onDone();
+      }, 2800),
     ];
     return ()=>timers.forEach(clearTimeout);
   },[]);
 
   return (
-    <div style={{ ...S.screen, alignItems:"center", justifyContent:"center", padding:40 }}>
+    <div style={{ height:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:40, background:"#0A0A0F", overflowY:"auto" }}>
       <div style={{ width:68, height:68, borderRadius:22, background:"linear-gradient(135deg,#6C63FF,#00D9A5)", display:"flex", alignItems:"center", justifyContent:"center", marginBottom:28, animation:"pulse 2s infinite" }}>
         <div style={{width:30,height:30,color:"#fff"}}><I.Key /></div>
       </div>
@@ -266,7 +390,7 @@ function YourIdScreen({ identity, onContinue }) {
 /* ══════════════════════════════════════════════════════════════════════════
    SCREEN 4 — CHAT LIST
 ══════════════════════════════════════════════════════════════════════════ */
-function ChatListScreen({ identity, contacts, onOpenChat, onSettings, onAddContact }) {
+function ChatListScreen({ identity, contacts, onOpenChat, onSettings, onAddContact, onReset }) {
   const [search,setSearch]       = useState("");
   const [showSearch,setShowSearch] = useState(false);
 
@@ -365,16 +489,70 @@ function ChatScreen({ contact, onBack }) {
 
   const send = useCallback(()=>{
     if(!input.trim()) return;
-    const msg = { id:Date.now(), from:"me", text:input.trim(), time:new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}), status:"sent", type:"text" };
+    const msgId  = `msg_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
+    const now    = new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+    const msg    = { id:msgId, from:"me", text:input.trim(), time:now, status:"sent", type:"text" };
     setMessages(p=>[...p,msg]);
     setInput("");
-    setTimeout(()=>setMessages(p=>p.map(m=>m.id===msg.id?{...m,status:"delivered"}:m)),700);
-    setTimeout(()=>setTyping(true),1200);
-    setTimeout(()=>{
-      setTyping(false);
-      setMessages(p=>[...p,{id:Date.now()+1,from:"them",text:"Message received! 🔐 E2EE working da.",time:new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),status:"read",type:"text"}]);
-    },3000);
-  },[input]);
+
+    // Send via real WebSocket relay
+    const sent = WS.send({
+      type:      "message",
+      messageId: msgId,
+      toId:      contact.id,
+      payload:   { ciphertext: btoa(input.trim()), nonce: "" }, // TODO: real E2EE
+      msgType:   "text",
+      timestamp: Date.now(),
+    });
+
+    if (sent) {
+      // Wait for server receipt
+      const unsub = WS.on("message", (data) => {
+        if (data.type === "receipt" && data.messageId === msgId) {
+          setMessages(p => p.map(m => m.id === msgId ? {...m, status: data.status} : m));
+          unsub();
+        }
+      });
+    } else {
+      // Offline — show queued status
+      setMessages(p=>p.map(m=>m.id===msgId?{...m,status:"sent"}:m));
+    }
+  },[input, contact]);
+
+  // Listen for incoming messages from relay
+  useEffect(()=>{
+    const unsub = WS.on("message", (data) => {
+      if (data.type === "message" && data.fromId === contact.id) {
+        let text = data.payload?.ciphertext || "";
+        try { text = atob(text); } catch {}
+        const incoming = {
+          id:     data.messageId || Date.now(),
+          from:   "them",
+          text,
+          time:   new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+          status: "read",
+          type:   "text",
+        };
+        setMessages(p => [...p, incoming]);
+        // Send read receipt
+        WS.send({ type:"receipt", toId:data.fromId, messageId:data.messageId, status:"read" });
+      }
+      if (data.type === "typing" && data.fromId === contact.id) {
+        setTyping(data.isTyping);
+        if (data.isTyping) setTimeout(()=>setTyping(false), 3000);
+      }
+      if (data.type === "receipt" && data.fromId === contact.id) {
+        setMessages(p => p.map(m => m.id === data.messageId ? {...m, status: data.status} : m));
+      }
+    });
+    return () => unsub();
+  },[contact]);
+
+  // Send typing indicator
+  const handleInputChange = useCallback((e)=>{
+    setInput(e.target.value);
+    WS.send({ type:"typing", toId:contact.id, isTyping: e.target.value.length > 0 });
+  },[contact]);
 
   return (
     <div style={S.screen}>
@@ -392,6 +570,7 @@ function ChatScreen({ contact, onBack }) {
           <div style={{width:11,height:11,color:"#00D9A5"}}><I.Shield /></div>
           <span style={{fontSize:10,color:"#00D9A5",fontWeight:600}}>E2EE</span>
         </div>
+        <div style={{width:8,height:8,borderRadius:"50%",background:WS.isConnected()?"#00D9A5":"#FFB347",boxShadow:WS.isConnected()?"0 0 6px #00D9A5":"none",flexShrink:0}} title={WS.isConnected()?"Connected":"Offline — messages queued"} />
         <button style={S.iconBtn}><div style={{width:18,height:18}}><I.More /></div></button>
       </div>
 
@@ -457,7 +636,7 @@ function ChatScreen({ contact, onBack }) {
         <div style={{flex:1,background:"#141420",borderRadius:22,border:"1px solid #2A2A3E",display:"flex",alignItems:"center",padding:"0 14px",minHeight:44}}>
           <input ref={inputRef} value={input} onChange={e=>setInput(e.target.value)}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-            placeholder="Message..." style={{flex:1,background:"none",border:"none",outline:"none",color:"#F0F0FF",fontSize:14,fontFamily:"'DM Sans',sans-serif",padding:"8px 0"}} />
+            placeholder="Message..." onChange={handleInputChange} style={{flex:1,background:"none",border:"none",outline:"none",color:"#F0F0FF",fontSize:14,fontFamily:"'DM Sans',sans-serif",padding:"8px 0"}} />
         </div>
         {input.trim() ? (
           <button onClick={send} style={{width:44,height:44,borderRadius:14,border:"none",cursor:"pointer",background:"linear-gradient(135deg,#6C63FF,#5B54E8)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 4px 16px #6C63FF44",flexShrink:0}}>
@@ -539,7 +718,7 @@ function AddContactScreen({ onBack, onAdd }) {
 /* ══════════════════════════════════════════════════════════════════════════
    SCREEN 7 — SETTINGS
 ══════════════════════════════════════════════════════════════════════════ */
-function SettingsScreen({ identity, onBack }) {
+function SettingsScreen({ identity, onBack, onReset }) {
   const [notifs,setNotifs]     = useState(true);
   const [theme,setTheme]       = useState("dark");
   const [lang,setLang]         = useState("en");
@@ -633,11 +812,16 @@ function SettingsScreen({ identity, onBack }) {
       body:(
         <div style={{padding:"12px 18px"}}>
           {[["Version","1.0.0"],["License","AGPL-3.0"],["Source","github.com/NAZRUDH/uraiadal"],["Domain","uraiadal.pages.dev"],["Cost","₹0 / month"]].map(([k,v],i)=>(
-            <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"9px 0",borderBottom:i<4?"1px solid #1A1A2E":"none"}}>
+            <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"9px 0",borderBottom:"1px solid #1A1A2E"}}>
               <span style={{fontSize:13,color:"#7B7B9A"}}>{k}</span>
               <span style={{fontSize:12,color:"#F0F0FF",fontFamily:"'JetBrains Mono',monospace"}}>{v}</span>
             </div>
           ))}
+          <div style={{marginTop:14}}>
+            <button onClick={onReset} style={{width:"100%",padding:"11px",borderRadius:12,border:"1px solid #FF4F6B44",background:"#FF4F6B11",color:"#FF4F6B",fontSize:13,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>
+              🗑️ Reset App / Clear Keys
+            </button>
+          </div>
         </div>
       )
     },
@@ -705,60 +889,137 @@ export default function App() {
   const [identity,setIdentity] = useState(null);
   const [contact, setContact]  = useState(null);
   const [contacts,setContacts] = useState(CONTACTS);
+  const [booting, setBooting]  = useState(true);
 
-  // Load saved identity on boot
+  // On boot: check for saved identity
+  // We NEVER jump to "chat" directly — max we go to "chats" (list)
   useEffect(()=>{
-    const saved = DB.get("urai_identity");
-    if(saved){ setIdentity(saved); setScreen("chats"); }
+    try {
+      const saved = DB.get("urai_identity");
+      const valid = saved
+        && typeof saved.shortId === "string"
+        && saved.shortId.startsWith("urai_")
+        && typeof saved.publicKey === "string"
+        && typeof saved.privateKey === "string"
+        && saved.shortId.length > 5;
+
+      if (valid) {
+        setIdentity(saved);
+        setScreen("chats");
+        // Connect to relay
+        WS.connect(saved.shortId);
+        WS.register(saved);
+      } else {
+        DB.clear();
+        setScreen("welcome");
+      }
+    } catch {
+      DB.clear();
+      setScreen("welcome");
+    } finally {
+      setBooting(false);
+    }
+    // Cleanup on unmount
+    return () => WS.disconnect();
   },[]);
 
   const go = {
     start:      ()=>setScreen("keygen"),
     restore:    ()=>setScreen("restore"),
-    afterKeygen:()=>{ setIdentity(DB.get("urai_identity")); setScreen("yourid"); },
-    toChats:    ()=>setScreen("chats"),
+    afterKeygen:()=>{
+      const id = DB.get("urai_identity");
+      if (id && id.shortId) {
+        setIdentity(id);
+        setScreen("yourid");
+        // Connect relay + register pubkeys
+        WS.connect(id.shortId);
+        WS.register(id);
+      } else {
+        setScreen("welcome");
+      }
+    },
+    toChats:    ()=>{ setContact(null); setScreen("chats"); },
     openChat:   (c)=>{ setContact(c); setScreen("chat"); },
     toSettings: ()=>setScreen("settings"),
     toAdd:      ()=>setScreen("addcontact"),
-    back:       ()=>setScreen("chats"),
+    back:       ()=>{ setContact(null); setScreen("chats"); },
     addContact: (c)=>setContacts(p=>[...p,c]),
-    doRestore:  ()=>{ setScreen("chats"); },
+    doRestore:  ()=>{ setContact(null); setScreen("chats"); },
+    resetApp:   ()=>{ localStorage.removeItem("urai_identity"); setIdentity(null); setContact(null); setScreen("welcome"); },
   };
+
+  const CSS = `
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+Tamil:wght@400;600&display=swap');
+    *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    html,body,#root{height:100%;width:100%;overflow:hidden;}
+    body{background:#0A0A0F;overscroll-behavior:none;}
+    ::-webkit-scrollbar{width:3px;}
+    ::-webkit-scrollbar-track{background:transparent;}
+    ::-webkit-scrollbar-thumb{background:#2A2A3E;border-radius:4px;}
+    input::placeholder,textarea::placeholder{color:#555;}
+    @keyframes pulse{0%,100%{box-shadow:0 0 40px #6C63FF44;}50%{box-shadow:0 0 70px #6C63FF99;}}
+    @keyframes bounce{0%,80%,100%{transform:translateY(0);}40%{transform:translateY(-7px);}}
+    @keyframes slideIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+    @keyframes scanLine{0%{transform:translateY(-100%);}100%{transform:translateY(600%);}}
+    @keyframes spin{to{transform:rotate(360deg);}}
+
+    /* ── Global scroll fix ── */
+    html, body, #root {
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+    * { box-sizing: border-box; }
+
+    /* All scrollable containers */
+    .scroll-container {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      min-height: 0;
+    }
+  `;
+
+  // Boot splash while reading localStorage
+  if (booting) {
+    return (
+      <>
+        <style>{CSS}</style>
+        <div style={{width:"100%",maxWidth:430,height:"100svh",margin:"0 auto",background:"#0A0A0F",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:20}}>
+          <div style={{width:64,height:64,borderRadius:20,background:"linear-gradient(135deg,#6C63FF,#00D9A5)",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 0 40px #6C63FF55",animation:"pulse 2s infinite"}}>
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          </div>
+          <p style={{fontSize:22,fontWeight:800,fontFamily:"Outfit,sans-serif",color:"#F0F0FF"}}>Uraiadal</p>
+          <div style={{width:28,height:28,border:"3px solid #2A2A3E",borderTopColor:"#6C63FF",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+Tamil:wght@400;600&display=swap');
-        *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-        html,body,#root{height:100%;width:100%;overflow:hidden;}
-        body{background:#0A0A0F;overscroll-behavior:none;}
-        ::-webkit-scrollbar{width:3px;}
-        ::-webkit-scrollbar-track{background:transparent;}
-        ::-webkit-scrollbar-thumb{background:#2A2A3E;border-radius:4px;}
-        input::placeholder,textarea::placeholder{color:#555;}
-        @keyframes pulse{0%,100%{box-shadow:0 0 40px #6C63FF44;}50%{box-shadow:0 0 70px #6C63FF99;}}
-        @keyframes bounce{0%,80%,100%{transform:translateY(0);}40%{transform:translateY(-7px);}}
-        @keyframes slideIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
-        @keyframes scanLine{0%{transform:translateY(-100%);}100%{transform:translateY(600%);}}
-      `}</style>
-
-      {/* THE APP SHELL — fixed height, no overflow */}
+      <style>{CSS}</style>
       <div style={{
         width:"100%", maxWidth:430, height:"100svh",
         margin:"0 auto", position:"relative",
         display:"flex", flexDirection:"column",
         overflow:"hidden", background:"#0A0A0F",
         boxShadow:"0 0 60px #6C63FF18",
-        fontFamily:"'DM Sans',sans-serif",
+        fontFamily:"DM Sans,sans-serif",
+        minHeight:0,
       }}>
         {screen==="welcome"    && <WelcomeScreen    onStart={go.start} onRestore={go.restore} />}
         {screen==="keygen"     && <KeyGenScreen     onDone={go.afterKeygen} />}
-        {screen==="yourid"     && identity && <YourIdScreen identity={identity} onContinue={go.toChats} />}
-        {screen==="chats"      && <ChatListScreen   identity={identity} contacts={contacts} onOpenChat={go.openChat} onSettings={go.toSettings} onAddContact={go.toAdd} />}
-        {screen==="chat"       && contact  && <ChatScreen    contact={contact} onBack={go.back} />}
-        {screen==="settings"   && <SettingsScreen   identity={identity} onBack={go.back} />}
-        {screen==="addcontact" && <AddContactScreen onBack={go.back} onAdd={go.addContact} />}
-        {screen==="restore"    && <RestoreScreen    onBack={()=>setScreen("welcome")} onRestore={go.doRestore} />}
+        {screen==="yourid"     && identity          && <YourIdScreen    identity={identity} onContinue={go.toChats} />}
+        {screen==="chats"      &&                     <ChatListScreen   identity={identity} contacts={contacts} onOpenChat={go.openChat} onSettings={go.toSettings} onAddContact={go.toAdd} onReset={go.resetApp} />}
+        {screen==="chat"       && contact && contact.id && <ChatScreen contact={contact} onBack={go.back} />}
+        {screen==="chat"       && (!contact || !contact.id) && go.back()}
+        {screen==="settings"   &&                     <SettingsScreen   identity={identity} onBack={go.back} onReset={go.resetApp} />}
+        {screen==="addcontact" &&                     <AddContactScreen onBack={go.back} onAdd={go.addContact} />}
+        {screen==="restore"    &&                     <RestoreScreen    onBack={()=>setScreen("welcome")} onRestore={go.doRestore} />}
       </div>
     </>
   );
