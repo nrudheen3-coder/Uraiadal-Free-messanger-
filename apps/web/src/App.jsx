@@ -96,9 +96,11 @@ const WS = {
   reconnectDelay: 1000,
   MAX_DELAY:      30000,
   manualClose:    false,
+  refCount:       0, // track how many components are using WS
 
   connect(shortId) {
     if (!shortId) return;
+    this.refCount++;
     if (this.socket?.readyState === WebSocket.OPEN) return;
     this.shortId     = shortId;
     this.manualClose = false;
@@ -109,6 +111,7 @@ const WS = {
         this.emit("status", "online");
         this._startHeartbeat();
         this._fetchPending();
+        this.startPolling(); // poll for missed messages
       };
       this.socket.onmessage = (e) => {
         try {
@@ -120,6 +123,7 @@ const WS = {
       };
       this.socket.onclose = () => {
         this._stopHeartbeat();
+        this.stopPolling();
         if (!this.manualClose) {
           this.emit("status", "offline");
           this.reconnectTimer = setTimeout(() => {
@@ -137,8 +141,11 @@ const WS = {
   },
 
   disconnect() {
+    this.refCount = Math.max(0, this.refCount - 1);
+    if (this.refCount > 0) return; // still in use
     this.manualClose = true;
     this._stopHeartbeat();
+    this.stopPolling();
     clearTimeout(this.reconnectTimer);
     if (this.socket) {
       this.socket.onclose = null;
@@ -217,9 +224,22 @@ const WS = {
     if (!this.shortId) return;
     try {
       const res  = await fetch(`${API_URL}/pending?id=${this.shortId}`);
+      if (!res.ok) return;
       const body = await res.json();
-      (body.messages || []).forEach(msg => this.emit("message", { type: "message", ...msg }));
+      const msgs = body.messages || [];
+      msgs.forEach(msg => this.emit("message", { type:"message", ...msg }));
     } catch {}
+  },
+
+  // Start polling for missed messages every 4 seconds
+  startPolling() {
+    this.stopPolling();
+    this.pollTimer = setInterval(() => this._fetchPending(), 4000);
+  },
+
+  stopPolling() {
+    clearInterval(this.pollTimer);
+    this.pollTimer = null;
   },
 };
 
@@ -1198,31 +1218,6 @@ export default function App() {
         setScreen("chats");
         WS.connect(saved.shortId);
         WS.register(saved);
-
-        // Global incoming message handler
-        WS.on("message", data => {
-          if (data.type === "message" && data.fromId) {
-            let text = data.payload?.ciphertext || "";
-            text = decryptText(text);
-            const msg = {
-              id:        data.messageId || uniqueId(),
-              from:      "them",
-              text,
-              time:      formatTime(data.timestamp),
-              timestamp: data.timestamp || Date.now(),
-              status:    "delivered",
-              type:      data.msgType || "text",
-            };
-            DB.addMessage(data.fromId, msg);
-
-            // Auto-add unknown senders as contacts
-            const existing = DB.getContacts().find(c => c.id === data.fromId);
-            if (!existing) {
-              DB.addContact({ id:data.fromId, name:data.fromId.slice(0, 16), online:true, lastSeen:"now" });
-            }
-            setContacts([...DB.getContacts()]);
-          }
-        });
       } else {
         DB.clear();
         setScreen("welcome");
@@ -1235,6 +1230,34 @@ export default function App() {
     }
     return () => WS.disconnect();
   }, []);
+
+  // ── Global incoming message listener — runs when identity loads ──
+  useEffect(() => {
+    if (!identity) return;
+    const unsub = WS.on("message", data => {
+      if (data.type !== "message" || !data.fromId) return;
+      let text = data.payload?.ciphertext || "";
+      text = decryptText(text);
+      const msg = {
+        id:        data.messageId || uniqueId(),
+        from:      "them",
+        text,
+        time:      formatTime(data.timestamp),
+        timestamp: data.timestamp || Date.now(),
+        status:    "delivered",
+        type:      data.msgType || "text",
+      };
+      DB.addMessage(data.fromId, msg);
+      // Auto-add unknown senders
+      const contacts = DB.getContacts();
+      if (!contacts.find(c => c.id === data.fromId)) {
+        DB.addContact({ id:data.fromId, name:data.fromId.slice(0, 16), online:true, lastSeen:"now" });
+      }
+      // Refresh contacts list to show new message preview
+      setContacts([...DB.getContacts()]);
+    });
+    return () => unsub();
+  }, [identity]);
 
   const go = {
     start:      () => setScreen("keygen"),
