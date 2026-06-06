@@ -732,6 +732,10 @@ function ChatScreen({ contact, identity, onBack, onDeleteContact }) {
   const send = useCallback(() => {
     const text = input.trim();
     if (!text) return;
+    if (text.length > 4096) {
+      alert("Message too long — max 4096 characters");
+      return;
+    }
 
     const msgId = uniqueId();
     const now   = Date.now();
@@ -929,7 +933,8 @@ function AddContactScreen({ onBack, onAdd, myId }) {
       if (data?.shortId) displayName = name.trim() || data.shortId;
     } catch {}
 
-    const contact = { id:contactId, name:displayName, online:false, lastSeen:"never", addedAt:Date.now() };
+    const safeName = displayName.slice(0, 50).replace(/[<>'"&]/g, "");
+    const contact  = { id:contactId, name:safeName, online:false, lastSeen:"never", addedAt:Date.now() };
     onAdd(contact);
     setStatus("success");
     setTimeout(() => onBack(), 800);

@@ -42,6 +42,9 @@ export class UserSession {
   }
 
   async webSocketMessage(ws, message) {
+    // Size limit — prevent KV abuse
+    if (message.length > 65536) return;
+
     const tags    = this.state.getTags(ws);
     const fromId  = tags[0];
     if (!fromId) return;
@@ -77,7 +80,16 @@ export class UserSession {
         timestamp: timestamp || Date.now(),
       });
 
-      // Step 1: Store in KV ALWAYS (guarantees polling delivery)
+      // Rate limit: max 60 messages per minute per sender
+    const rlKey   = `rl:${fromId}`;
+    const rlCount = parseInt(await this.env.REGISTRY.get(rlKey) || "0");
+    if (rlCount > 60) {
+      ws.send(JSON.stringify({ type:"error", message:"Rate limited — slow down" }));
+      return;
+    }
+    await this.env.REGISTRY.put(rlKey, String(rlCount + 1), { expirationTtl: 60 });
+
+    // Step 1: Store in KV ALWAYS (guarantees polling delivery)
       await this.env.REGISTRY.put(
         `msg:${toId}:${messageId}`,
         envelope,
@@ -173,10 +185,18 @@ export class UserSession {
 export default {
   async fetch(request, env) {
     const url  = new URL(request.url);
+    const allowedOrigins = [
+      "https://uraiadal.pages.dev",
+      "http://localhost:5173",
+      "http://localhost:3000",
+    ];
+    const origin     = request.headers.get("Origin") || "";
+    const corsOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
     const cors = {
-      "Access-Control-Allow-Origin":  "*",
+      "Access-Control-Allow-Origin":  corsOrigin,
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
+      "Vary": "Origin",
     };
 
     if (request.method === "OPTIONS") return new Response(null, { headers: cors });
