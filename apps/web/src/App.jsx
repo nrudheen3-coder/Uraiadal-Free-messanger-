@@ -327,7 +327,7 @@ const S = {
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   WEBRTC CALL MANAGER
+   WEBRTC CALL MANAGER — HTTP Signaling (reliable on all networks)
 ═══════════════════════════════════════════════════════════════════════════ */
 const RTC = {
   pc:           null,
@@ -335,25 +335,23 @@ const RTC = {
   remoteStream: null,
   callType:     null,
   peerId:       null,
+  myId:         null,
   state:        "idle",
   listeners:    {},
+  _pollTimer:   null,
+  _callTimeout: null,
+  _iceBatch:    [],
+  _iceBatchTimer: null,
+
   ICE_SERVERS: {
     iceServers: [
-      { urls:"stun:stun.l.google.com:19302" },
-      { urls:"stun:stun1.l.google.com:19302" },
-      { urls:"stun:stun2.l.google.com:19302" },
-      { urls:"stun:stun3.l.google.com:19302" },
-      // Free TURN from Open Relay (helps with strict NAT/mobile networks)
-      {
-        urls:"turn:openrelay.metered.ca:80",
-        username:"openrelayproject",
-        credential:"openrelayproject",
-      },
-      {
-        urls:"turn:openrelay.metered.ca:443",
-        username:"openrelayproject",
-        credential:"openrelayproject",
-      },
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun3.l.google.com:19302" },
+      { urls: "turn:openrelay.metered.ca:80",  username:"openrelayproject", credential:"openrelayproject" },
+      { urls: "turn:openrelay.metered.ca:443", username:"openrelayproject", credential:"openrelayproject" },
+      { urls: "turn:openrelay.metered.ca:443?transport=tcp", username:"openrelayproject", credential:"openrelayproject" },
     ]
   },
 
@@ -363,158 +361,266 @@ const RTC = {
     return () => this.listeners[event]?.delete(cb);
   },
   emit(event, data) {
-    this.listeners[event]?.forEach(cb => { try { cb(data); } catch {} });
+    this.listeners[event]?.forEach(cb => { try { cb(data); } catch(e) { console.warn("[RTC emit]", e); } });
   },
 
+  // ── HTTP signal send/receive ──────────────────────────────────────────────
+  async _sendSignal(toId, signal) {
+    try {
+      await fetch(`${API_URL}/signal`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromId:this.myId, toId, signal }),
+      });
+    } catch(e) { console.warn("[RTC] signal send failed:", e); }
+  },
+
+  async _pollSignals() {
+    if (!this.myId || this.state === "idle") return;
+    try {
+      const res  = await fetch(`${API_URL}/signal?id=${this.myId}`);
+      if (!res.ok) return;
+      const { signals } = await res.json();
+      for (const item of (signals || [])) {
+        await this._handleIncoming(item.fromId, item.signal);
+      }
+    } catch {}
+  },
+
+  _startPoll() {
+    this._stopPoll();
+    this._pollTimer = setInterval(() => this._pollSignals(), 800);
+  },
+  _stopPoll() {
+    clearInterval(this._pollTimer);
+    this._pollTimer = null;
+  },
+
+  // ── Media ─────────────────────────────────────────────────────────────────
   async getMedia(type) {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Camera/Mic not supported on this browser");
     }
     const constraints = {
       audio: { echoCancellation:true, noiseSuppression:true, sampleRate:48000 },
-      video: type === "video" ? { facingMode:"user", width:{ideal:640}, height:{ideal:480} } : false,
+      video: type === "video"
+        ? { facingMode:"user", width:{ ideal:640 }, height:{ ideal:480 } }
+        : false,
     };
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
       return this.localStream;
     } catch(err) {
-      if (err.name === "NotAllowedError") throw new Error("Please allow Camera/Microphone access");
-      if (err.name === "NotFoundError")   throw new Error("No Camera/Microphone found on device");
+      if (err.name === "NotAllowedError") throw new Error("Please allow Camera/Microphone access and try again");
+      if (err.name === "NotFoundError")   throw new Error("No Camera/Microphone found on this device");
       throw new Error(`Media error: ${err.message}`);
     }
   },
 
-  createPC() {
+  // ── Peer Connection ───────────────────────────────────────────────────────
+  _createPC() {
+    if (this.pc) { this.pc.close(); this.pc = null; }
     this.pc           = new RTCPeerConnection(this.ICE_SERVERS);
     this.remoteStream = new MediaStream();
-    if (this.localStream) {
-      this.localStream.getTracks().forEach(t => this.pc.addTrack(t, this.localStream));
-    }
+
+    // Add local tracks
+    this.localStream?.getTracks().forEach(t => this.pc.addTrack(t, this.localStream));
+
+    // Receive remote tracks
     this.pc.ontrack = (e) => {
-      e.streams[0].getTracks().forEach(t => this.remoteStream.addTrack(t));
+      e.streams[0]?.getTracks().forEach(t => this.remoteStream.addTrack(t));
       this.emit("remoteStream", this.remoteStream);
     };
+
+    // Batch ICE candidates for efficiency
     this.pc.onicecandidate = (e) => {
-      if (e.candidate) WS.send({ type:"call_signal", toId:this.peerId, signal:{ type:"ice", candidate:e.candidate } });
+      if (!e.candidate) return;
+      this._iceBatch.push(e.candidate);
+      clearTimeout(this._iceBatchTimer);
+      this._iceBatchTimer = setTimeout(() => {
+        if (this._iceBatch.length > 0) {
+          this._sendSignal(this.peerId, { type:"ice", candidates: this._iceBatch });
+          this._iceBatch = [];
+        }
+      }, 200); // batch for 200ms
     };
+
     this.pc.onconnectionstatechange = () => {
       const s = this.pc?.connectionState;
-      console.debug("[RTC] connectionState:", s);
+      console.debug("[RTC] connection:", s);
       if (s === "connected")    { this.state = "connected"; this.emit("state","connected"); }
-      if (s === "disconnected" || s === "failed") this.hangup();
+      if (s === "disconnected" || s === "failed") { this.hangup(); }
     };
+
     this.pc.oniceconnectionstatechange = () => {
-      console.debug("[RTC] iceConnectionState:", this.pc?.iceConnectionState);
+      console.debug("[RTC] ice:", this.pc?.iceConnectionState);
     };
-    this.pc.onsignalingstatechange = () => {
-      console.debug("[RTC] signalingState:", this.pc?.signalingState);
-    };
+
     return this.pc;
   },
 
+  // ── Initiate call ─────────────────────────────────────────────────────────
   async call(peerId, type, myId) {
-    if (this.state !== "idle") return;
-    this.peerId = peerId; this.callType = type; this.state = "calling";
+    if (this.state !== "idle") { this.emit("error","Already in a call"); return; }
+    this.peerId   = peerId;
+    this.callType = type;
+    this.myId     = myId;
+    this.state    = "calling";
+
     try {
       await this.getMedia(type);
-      this.createPC();
-      const offer = await this.pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:type==="video" });
-      await this.pc.setLocalDescription(offer);
-      // Send offer SDP — include callType so receiver knows audio/video
-      WS.send({ type:"call_signal", toId:peerId, fromId:myId, signal:{
-        type:"offer",
-        sdp: offer.sdp,
-        callType: type,
-      }});
-      this.emit("state","calling");
+      this._createPC();
 
-      // Auto-hangup if no answer in 30 seconds
+      const offer = await this.pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: type === "video",
+      });
+      await this.pc.setLocalDescription(offer);
+
+      await this._sendSignal(peerId, {
+        type:     "offer",
+        sdp:      offer.sdp,
+        callType: type,
+      });
+
+      this.emit("state","calling");
+      this._startPoll(); // poll for answer + ICE
+
+      // 45s timeout
       this._callTimeout = setTimeout(() => {
         if (this.state === "calling") {
           this.hangup();
           this.emit("timeout");
         }
-      }, 30000);
-    } catch(err) { this.hangup(); throw err; }
+      }, 45000);
+    } catch(err) {
+      this.hangup();
+      throw err;
+    }
   },
 
-  async answer(peerId, offer, type) {
-    // Allow answering even if state was already changed
-    this.peerId = peerId; this.callType = type; this.state = "ringing";
+  // ── Answer call ───────────────────────────────────────────────────────────
+  async answer(peerId, offerSdp, type, myId) {
+    this.peerId   = peerId;
+    this.callType = type;
+    this.myId     = myId;
+    this.state    = "connecting";
+
     try {
       await this.getMedia(type);
-      this.createPC();
-      // Normalise offer — may come in different shapes
-      const sdpOffer = offer?.sdp || offer;
-      const offerDesc = typeof sdpOffer === "string"
-        ? { type:"offer", sdp:sdpOffer }
-        : sdpOffer;
-      await this.pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
+      this._createPC();
+
+      const desc = typeof offerSdp === "string"
+        ? { type:"offer", sdp:offerSdp }
+        : offerSdp;
+      await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
+
       const answer = await this.pc.createAnswer();
       await this.pc.setLocalDescription(answer);
-      WS.send({ type:"call_signal", toId:peerId, signal:{ type:"answer", sdp:answer } });
-      this.state = "connected"; this.emit("state","connected");
-    } catch(err) { this.hangup(); throw err; }
+
+      await this._sendSignal(peerId, { type:"answer", sdp:answer.sdp });
+
+      this.emit("state","connecting");
+      this._startPoll(); // poll for ICE candidates
+    } catch(err) {
+      this.hangup();
+      throw err;
+    }
   },
 
-  async handleSignal(fromId, signal) {
+  // ── Handle incoming signal ────────────────────────────────────────────────
+  async _handleIncoming(fromId, signal) {
+    if (!signal) return;
+    console.debug("[RTC] incoming signal:", signal.type, "from:", fromId);
+
     if (signal.type === "offer") {
-      this.peerId = fromId; this.callType = signal.callType || "audio"; this.state = "ringing";
-      this.emit("incoming", { fromId, callType:this.callType, offer:signal });
+      if (this.state !== "idle") return; // busy
+      this.peerId   = fromId;
+      this.callType = signal.callType || "audio";
+      this.state    = "ringing";
+      this._startPoll(); // poll while ringing
+      this.emit("incoming", { fromId, callType:this.callType, offerSdp:signal.sdp });
       return;
     }
+
     if (signal.type === "answer" && this.pc) {
-      const sdp = signal.sdp || signal;
-      const desc = typeof sdp === "string" ? { type:"answer", sdp } : sdp;
-      await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
+      try {
+        const desc = typeof signal.sdp === "string"
+          ? { type:"answer", sdp:signal.sdp }
+          : signal.sdp;
+        await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
+        clearTimeout(this._callTimeout);
+      } catch(e) { console.warn("[RTC] setRemoteDescription answer failed:", e); }
       return;
     }
-    if (signal.type === "ice" && this.pc && signal.candidate) {
-      try { await this.pc.addIceCandidate(new RTCIceCandidate(signal.candidate)); } catch {} return;
+
+    if (signal.type === "ice" && this.pc) {
+      const candidates = signal.candidates || (signal.candidate ? [signal.candidate] : []);
+      for (const candidate of candidates) {
+        try { await this.pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+      }
+      return;
     }
-    if (signal.type === "hangup")  { this.hangup(); return; }
-    if (signal.type === "reject")  { this.hangup(); this.emit("rejected"); return; }
+
+    if (signal.type === "hangup") { this.hangup(); return; }
+    if (signal.type === "reject") { this.hangup(); this.emit("rejected"); return; }
   },
 
-  reject(peerId) {
-    WS.send({ type:"call_signal", toId:peerId, signal:{ type:"reject" } });
-    this.state = "idle"; this.emit("state","idle");
+  reject(peerId, myId) {
+    this._sendSignal(peerId, { type:"reject" });
+    this._stopPoll();
+    this.state = "idle";
+    this.emit("state","idle");
   },
 
   hangup() {
     if (this.state === "idle") return;
     clearTimeout(this._callTimeout);
-    if (this.peerId) WS.send({ type:"call_signal", toId:this.peerId, signal:{ type:"hangup" } });
+    clearTimeout(this._iceBatchTimer);
+    this._stopPoll();
+    if (this.peerId && this.myId) {
+      this._sendSignal(this.peerId, { type:"hangup" }).catch(() => {});
+    }
     this.localStream?.getTracks().forEach(t => t.stop());
     this.remoteStream?.getTracks().forEach(t => t.stop());
     this.pc?.close();
-    this.pc = null; this.localStream = null; this.remoteStream = null;
-    this.peerId = null; this.callType = null; this.state = "idle";
-    this._callTimeout = null;
+    this.pc           = null;
+    this.localStream  = null;
+    this.remoteStream = null;
+    this._iceBatch    = [];
+    this.peerId       = null;
+    this.callType     = null;
+    this.myId         = null;
+    this.state        = "idle";
     this.emit("state","idle");
   },
 
   toggleMute() {
     const a = this.localStream?.getAudioTracks()[0];
-    if (a) { a.enabled = !a.enabled; return !a.enabled; } return false;
+    if (a) { a.enabled = !a.enabled; this.emit("muted",!a.enabled); return !a.enabled; }
+    return false;
   },
   toggleVideo() {
     const v = this.localStream?.getVideoTracks()[0];
-    if (v) { v.enabled = !v.enabled; return !v.enabled; } return false;
+    if (v) { v.enabled = !v.enabled; this.emit("videoOff",!v.enabled); return !v.enabled; }
+    return false;
   },
   async flipCamera() {
     const v = this.localStream?.getVideoTracks()[0];
     if (!v) return;
-    const facing = v.getSettings().facingMode;
-    const ns = await navigator.mediaDevices.getUserMedia({ audio:true, video:{ facingMode: facing==="user"?"environment":"user" } });
-    const nv = ns.getVideoTracks()[0];
-    const sender = this.pc?.getSenders().find(s => s.track?.kind==="video");
-    if (sender) await sender.replaceTrack(nv);
-    v.stop();
-    this.localStream.removeTrack(v);
-    this.localStream.addTrack(nv);
-    this.emit("localStream", this.localStream);
+    const facing = v.getSettings().facingMode === "user" ? "environment" : "user";
+    try {
+      const ns = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:facing } });
+      const nv = ns.getVideoTracks()[0];
+      const sender = this.pc?.getSenders().find(s => s.track?.kind === "video");
+      if (sender) await sender.replaceTrack(nv);
+      v.stop();
+      this.localStream.removeTrack(v);
+      this.localStream.addTrack(nv);
+      this.emit("localStream", this.localStream);
+    } catch(e) { console.warn("[RTC] flipCamera failed:", e); }
   },
+  isOnCall() { return this.state !== "idle"; },
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1668,11 +1774,7 @@ export default function App() {
   useEffect(() => {
     if (!identity) return;
     const unsub = WS.on("message", data => {
-      // Route call signals to RTC manager
-    if (data.type === "call_signal" && data.fromId) {
-      RTC.handleSignal(data.fromId, data.signal || {});
-      return;
-    }
+      // Call signals now handled via HTTP polling (RTC._pollSignals)
     if (data.type !== "message" || !data.fromId) return;
       let text = data.payload?.ciphertext || "";
       text = decryptText(text);
@@ -1701,8 +1803,8 @@ export default function App() {
   useEffect(() => {
     if (!identity) return;
 
-    const unsubIncoming = RTC.on("incoming", ({ fromId, callType, offer }) => {
-      setIncomingCall({ fromId, callType, offer });
+    const unsubIncoming = RTC.on("incoming", ({ fromId, callType, offerSdp }) => {
+      setIncomingCall({ fromId, callType, offer: offerSdp });
     });
 
     const unsubState = RTC.on("state", (s) => {
@@ -1711,14 +1813,9 @@ export default function App() {
         setIncomingCall(null);
         setCallContact(null);
         setCallType(null);
-        WS.startPolling(false); // restore normal polling
       }
       if (s === "connected") {
         setIncomingCall(null);
-        WS.startPolling(true); // keep fast polling when connected
-      }
-      if (s === "calling" || s === "connecting") {
-        WS.startPolling(true); // fast poll during negotiation
       }
     });
 
@@ -1801,11 +1898,8 @@ export default function App() {
       setCallContact(c);
       setCallType(type);
       setCallState("calling");
-      WS.startPolling(true); // fast poll during call
       RTC.call(c.id, type, identity?.shortId).catch(err => {
         alert(`Call failed: ${err.message}`);
-        RTC.hangup();
-        WS.startPolling(false); // back to normal poll
         setCallState("idle");
         setCallContact(null);
       });
@@ -1820,22 +1914,19 @@ export default function App() {
       setCallState("connecting"); // show connecting state while WebRTC negotiates
       setIncomingCall(null);
       // RTC state listener will set "connected" when PC connects
-      WS.startPolling(true); // fast poll during call
-      RTC.answer(fromId, offer?.sdp ? offer : { sdp:offer }, callType)
+      RTC.answer(fromId, offer?.sdp || offer, callType, identity?.shortId)
         .catch(err => {
           alert(`Could not answer: ${err.message}`);
-          WS.startPolling(false);
           setCallState("idle");
           setCallContact(null);
         });
     },
     rejectCall: () => {
-      if (incomingCall) RTC.reject(incomingCall.fromId);
+      if (incomingCall) RTC.reject(incomingCall.fromId, identity?.shortId);
       setIncomingCall(null);
     },
     hangup: () => {
       RTC.hangup();
-      WS.startPolling(false); // restore normal poll
       setCallState("idle");
       setCallContact(null);
       setCallType(null);

@@ -279,9 +279,58 @@ export default {
       return json({ online:!!data, lastSeen: data ? JSON.parse(data).ts : null });
     }
 
+    // ── Call signaling via HTTP (reliable, no WS needed) ──
+    // POST /signal — store signal for recipient
+    if (url.pathname === "/signal" && request.method === "POST") {
+      try {
+        const { fromId, toId, signal } = await request.json();
+        if (!fromId || !toId || !signal) return json({ error:"Missing fields" }, 400);
+        if (!fromId.startsWith("urai_") || !toId.startsWith("urai_")) {
+          return json({ error:"Invalid IDs" }, 400);
+        }
+        // Signal type determines TTL
+        // offer/answer/reject/hangup: 2 minutes
+        // ice candidates: 30 seconds (stale ICE useless)
+        const ttl = signal.type === "ice" ? 30 : 120;
+        const key = `sig:${toId}:${signal.type}_${fromId}_${Date.now()}`;
+        await env.REGISTRY.put(key, JSON.stringify({ fromId, signal, ts:Date.now() }), { expirationTtl:ttl });
+
+        // also attempt live WS delivery
+        try {
+          const doId    = env.USER_SESSION.idFromName(toId);
+          const doInst  = env.USER_SESSION.get(doId);
+          await doInst.fetch(new Request("https://relay/deliver", {
+            method:  "POST",
+            headers: { "Content-Type":"application/json" },
+            body:    JSON.stringify({ type:"call_signal", fromId, signal }),
+          }));
+        } catch {}
+
+        return json({ success:true });
+      } catch { return json({ error:"Bad request" }, 400); }
+    }
+
+    // GET /signal?id=urai_xxx — fetch pending signals for recipient
+    if (url.pathname === "/signal" && request.method === "GET") {
+      const shortId = url.searchParams.get("id");
+      if (!shortId?.startsWith("urai_")) return json({ signals:[] });
+      const list = await env.REGISTRY.list({ prefix:`sig:${shortId}:` });
+      const signals = await Promise.all(
+        list.keys.map(async k => {
+          const val = await env.REGISTRY.get(k.name);
+          if (val) {
+            await env.REGISTRY.delete(k.name);
+            return JSON.parse(val);
+          }
+          return null;
+        })
+      );
+      return json({ signals: signals.filter(Boolean) });
+    }
+
     // Health
     if (url.pathname === "/health") {
-      return json({ status:"ok", service:"Uraiadal Relay", version:"4.0.0", timestamp:Date.now() });
+      return json({ status:"ok", service:"Uraiadal Relay", version:"4.1.0", timestamp:Date.now() });
     }
 
     return new Response("Uraiadal Relay v4.0", { headers:cors });
