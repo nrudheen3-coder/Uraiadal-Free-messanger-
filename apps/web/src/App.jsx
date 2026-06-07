@@ -330,6 +330,19 @@ const RTC = {
     iceServers: [
       { urls:"stun:stun.l.google.com:19302" },
       { urls:"stun:stun1.l.google.com:19302" },
+      { urls:"stun:stun2.l.google.com:19302" },
+      { urls:"stun:stun3.l.google.com:19302" },
+      // Free TURN from Open Relay (helps with strict NAT/mobile networks)
+      {
+        urls:"turn:openrelay.metered.ca:80",
+        username:"openrelayproject",
+        credential:"openrelayproject",
+      },
+      {
+        urls:"turn:openrelay.metered.ca:443",
+        username:"openrelayproject",
+        credential:"openrelayproject",
+      },
     ]
   },
 
@@ -380,18 +393,36 @@ const RTC = {
       this.createPC();
       const offer = await this.pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:type==="video" });
       await this.pc.setLocalDescription(offer);
-      WS.send({ type:"call_signal", toId:peerId, fromId:myId, signal:{ type:"offer", sdp:offer, callType:type } });
+      // Send offer SDP — include callType so receiver knows audio/video
+      WS.send({ type:"call_signal", toId:peerId, fromId:myId, signal:{
+        type:"offer",
+        sdp: offer.sdp,
+        callType: type,
+      }});
       this.emit("state","calling");
+
+      // Auto-hangup if no answer in 30 seconds
+      this._callTimeout = setTimeout(() => {
+        if (this.state === "calling") {
+          this.hangup();
+          this.emit("timeout");
+        }
+      }, 30000);
     } catch(err) { this.hangup(); throw err; }
   },
 
   async answer(peerId, offer, type) {
-    if (this.state !== "ringing") return;
-    this.peerId = peerId; this.callType = type;
+    // Allow answering even if state was already changed
+    this.peerId = peerId; this.callType = type; this.state = "ringing";
     try {
       await this.getMedia(type);
       this.createPC();
-      await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+      // Normalise offer — may come in different shapes
+      const sdpOffer = offer?.sdp || offer;
+      const offerDesc = typeof sdpOffer === "string"
+        ? { type:"offer", sdp:sdpOffer }
+        : sdpOffer;
+      await this.pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
       const answer = await this.pc.createAnswer();
       await this.pc.setLocalDescription(answer);
       WS.send({ type:"call_signal", toId:peerId, signal:{ type:"answer", sdp:answer } });
@@ -406,7 +437,10 @@ const RTC = {
       return;
     }
     if (signal.type === "answer" && this.pc) {
-      await this.pc.setRemoteDescription(new RTCSessionDescription(signal)); return;
+      const sdp = signal.sdp || signal;
+      const desc = typeof sdp === "string" ? { type:"answer", sdp } : sdp;
+      await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
+      return;
     }
     if (signal.type === "ice" && this.pc && signal.candidate) {
       try { await this.pc.addIceCandidate(new RTCIceCandidate(signal.candidate)); } catch {} return;
@@ -422,12 +456,14 @@ const RTC = {
 
   hangup() {
     if (this.state === "idle") return;
+    clearTimeout(this._callTimeout);
     if (this.peerId) WS.send({ type:"call_signal", toId:this.peerId, signal:{ type:"hangup" } });
     this.localStream?.getTracks().forEach(t => t.stop());
     this.remoteStream?.getTracks().forEach(t => t.stop());
     this.pc?.close();
     this.pc = null; this.localStream = null; this.remoteStream = null;
     this.peerId = null; this.callType = null; this.state = "idle";
+    this._callTimeout = null;
     this.emit("state","idle");
   },
 
@@ -1371,7 +1407,7 @@ function IncomingCallModal({ fromId, callType, onAnswer, onReject }) {
           Incoming {callType === "video" ? "Video" : "Voice"} Call
         </p>
         <h2 style={{ fontSize:22, fontWeight:700, color:"#F0F0FF", fontFamily:"'Outfit',sans-serif", marginBottom:6 }}>
-          {fromId.slice(0,16)}
+          {DB.getContacts().find(c=>c.id===fromId)?.name || fromId.slice(0,16)}
         </h2>
         <code style={{ fontSize:11, color:"#6C63FF", fontFamily:"'JetBrains Mono',monospace" }}>{fromId}</code>
 
@@ -1407,6 +1443,10 @@ function CallScreen({ contact, callType, callState, onHangup, identity }) {
   const [speaker,    setSpeaker]    = useState(true);
   const [duration,   setDuration]   = useState(0);
   const [connecting, setConnecting] = useState(callState !== "connected");
+  // Update connecting status when callState changes
+  useEffect(() => {
+    setConnecting(callState !== "connected");
+  }, [callState]);
   const timerRef = useRef(null);
 
   // Duration timer
@@ -1482,8 +1522,8 @@ function CallScreen({ contact, callType, callState, onHangup, identity }) {
           <h2 style={{ fontSize:24, fontWeight:700, color:"#F0F0FF", fontFamily:"'Outfit',sans-serif", margin:"0 0 6px" }}>
             {contact.name || contact.id.slice(0,16)}
           </h2>
-          <p style={{ fontSize:14, color: connecting ? "#FFB347" : "#00D9A5", margin:0, fontFamily:"'DM Sans',sans-serif" }}>
-            {connecting ? "Connecting..." : formatDuration(duration)}
+          <p style={{ fontSize:14, color: callState==="calling"?"#FFB347": callState==="connecting"?"#6C63FF":"#00D9A5", margin:0, fontFamily:"'DM Sans',sans-serif" }}>
+            {callState==="calling" ? "Ringing... 🔔" : callState==="connecting" ? "Connecting..." : formatDuration(duration)}
           </p>
         </div>
 
@@ -1583,23 +1623,7 @@ export default function App() {
         WS.connect(saved.shortId);
         WS.register(saved);
 
-        // Listen for incoming calls
-        RTC.on("incoming", ({ fromId, callType }) => {
-          setIncomingCall({ fromId, callType });
-        });
-        RTC.on("state", (s) => {
-          setCallState(s);
-          if (s === "idle") {
-            setIncomingCall(null);
-            setCallContact(null);
-            setCallType(null);
-          }
-        });
-        RTC.on("rejected", () => {
-          setCallState("idle");
-          setCallContact(null);
-          alert("Call rejected");
-        });
+        // RTC listeners registered in separate effect below
       } else {
         DB.clear();
         setScreen("welcome");
@@ -1644,6 +1668,48 @@ export default function App() {
       setContacts([...DB.getContacts()]);
     });
     return () => unsub();
+  }, [identity]);
+
+  // ── RTC call event listeners ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!identity) return;
+
+    const unsubIncoming = RTC.on("incoming", ({ fromId, callType, offer }) => {
+      setIncomingCall({ fromId, callType, offer });
+    });
+
+    const unsubState = RTC.on("state", (s) => {
+      setCallState(s);
+      if (s === "idle") {
+        setIncomingCall(null);
+        setCallContact(null);
+        setCallType(null);
+      }
+      if (s === "connected") {
+        setIncomingCall(null); // clear modal when connected
+      }
+    });
+
+    const unsubRejected = RTC.on("rejected", () => {
+      setCallState("idle");
+      setCallContact(null);
+      setCallType(null);
+      setIncomingCall(null);
+    });
+
+    const unsubTimeout = RTC.on("timeout", () => {
+      setCallState("idle");
+      setCallContact(null);
+      setCallType(null);
+      alert("No answer — call ended");
+    });
+
+    return () => {
+      unsubIncoming();
+      unsubState();
+      unsubRejected();
+      unsubTimeout();
+    };
   }, [identity]);
 
   const go = {
@@ -1696,22 +1762,36 @@ export default function App() {
       setScreen("welcome");
     },
     startCall: (c, type) => {
+      if (RTC.state !== "idle") {
+        alert("Already in a call");
+        return;
+      }
       setCallContact(c);
       setCallType(type);
       setCallState("calling");
       RTC.call(c.id, type, identity?.shortId).catch(err => {
         alert(`Call failed: ${err.message}`);
+        RTC.hangup();
         setCallState("idle");
         setCallContact(null);
       });
     },
     answerCall: () => {
       if (!incomingCall) return;
-      setCallContact({ id:incomingCall.fromId, name:incomingCall.fromId.slice(0,16) });
-      setCallType(incomingCall.callType);
-      setCallState("connected");
+      const { fromId, callType, offer } = incomingCall;
+      // Find contact name if saved
+      const saved = DB.getContacts().find(c => c.id === fromId);
+      setCallContact(saved || { id:fromId, name:fromId.slice(0,16) });
+      setCallType(callType);
+      setCallState("connecting"); // show connecting state while WebRTC negotiates
       setIncomingCall(null);
-      RTC.answer(incomingCall.fromId, incomingCall.offer, incomingCall.callType);
+      // RTC state listener will set "connected" when PC connects
+      RTC.answer(fromId, offer?.sdp ? offer : { sdp:offer }, callType)
+        .catch(err => {
+          alert(`Could not answer: ${err.message}`);
+          setCallState("idle");
+          setCallContact(null);
+        });
     },
     rejectCall: () => {
       if (incomingCall) RTC.reject(incomingCall.fromId);
@@ -1784,7 +1864,7 @@ export default function App() {
       )}
 
       {/* Active call screen */}
-      {(callState === "calling" || callState === "connected") && callContact && (
+      {(callState === "calling" || callState === "connecting" || callState === "connected") && callContact && (
         <CallScreen
           contact={callContact}
           callType={callType}
