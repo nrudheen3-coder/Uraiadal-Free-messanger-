@@ -158,6 +158,24 @@ export class UserSession {
       } catch {}
       return;
     }
+
+    // ── Call signaling (WebRTC SDP + ICE) ──
+    if (type === "call_signal") {
+      const { toId, signal } = data;
+      if (!toId || !signal) return;
+      // Call signals delivered live only (no KV storage — time-sensitive)
+      try {
+        const recipDO = this.env.USER_SESSION.get(
+          this.env.USER_SESSION.idFromName(toId)
+        );
+        await recipDO.fetch(new Request("https://relay/deliver", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "call_signal", fromId, signal }),
+        }));
+      } catch {}
+      return;
+    }
   }
 
   async webSocketClose(ws) {

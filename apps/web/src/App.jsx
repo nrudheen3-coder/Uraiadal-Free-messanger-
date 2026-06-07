@@ -270,6 +270,14 @@ const I = {
   Trash:   () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6M10 11v6M14 11v6M9 6V4h6v2"/></svg>,
   Wifi:    () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg>,
   WifiOff: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A10.94 10.94 0 0119 12.55M5 12.55a10.94 10.94 0 015.17-2.39M10.71 5.05A16 16 0 0122.56 9M1.42 9a15.91 15.91 0 014.7-2.88M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg>,
+  Phone:   () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.4 10.8a19.79 19.79 0 01-3.07-8.67A2 2 0 012.31 0h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L6.91 7.91a16 16 0 006.29 6.29l1.27-.76a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>,
+  PhoneOff:() => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.5 16.5L19.36 19.36A2 2 0 0121.18 20h.82a2 2 0 002-2.18 19.79 19.79 0 00-.88-4.06 2 2 0 00-2.11-.45l-1.27.76M10.68 10.68A19.5 19.5 0 003.4 10.8a19.79 19.79 0 00-3.07-8.67A2 2 0 012.31 0h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L6.91 7.91"/></svg>,
+  Video:   () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>,
+  VideoOff:() => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M15 13a3 3 0 01-3 3H4a2 2 0 01-2-2V7m2-2h9a2 2 0 012 2v3l4-3v9"/></svg>,
+  Mic:     () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a3 3 0 013 3v7a3 3 0 01-6 0V5a3 3 0 013-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v3M8 22h8"/></svg>,
+  MicOff:  () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V5a3 3 0 00-5.94-.6M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v3M8 22h8"/></svg>,
+  CamFlip: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>,
+  Speaker: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>,
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -305,6 +313,145 @@ const S = {
   btnPrimary: { width:"100%", padding:"15px 0", borderRadius:16, border:"none", cursor:"pointer", background:`linear-gradient(135deg,${T.primary},#5B54E8)`, color:"#fff", fontSize:15, fontWeight:700, fontFamily:T.display, boxShadow:`0 8px 24px ${T.primary}44`, transition:"transform 0.15s, opacity 0.15s" },
   btnGhost:   { width:"100%", padding:"13px 0", borderRadius:16, border:`1px solid ${T.border2}`, cursor:"pointer", background:"transparent", color:T.muted, fontSize:14, fontFamily:T.body },
   card:       { background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, overflow:"hidden" },
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WEBRTC CALL MANAGER
+═══════════════════════════════════════════════════════════════════════════ */
+const RTC = {
+  pc:           null,
+  localStream:  null,
+  remoteStream: null,
+  callType:     null,
+  peerId:       null,
+  state:        "idle",
+  listeners:    {},
+  ICE_SERVERS: {
+    iceServers: [
+      { urls:"stun:stun.l.google.com:19302" },
+      { urls:"stun:stun1.l.google.com:19302" },
+    ]
+  },
+
+  on(event, cb) {
+    if (!this.listeners[event]) this.listeners[event] = new Set();
+    this.listeners[event].add(cb);
+    return () => this.listeners[event]?.delete(cb);
+  },
+  emit(event, data) {
+    this.listeners[event]?.forEach(cb => { try { cb(data); } catch {} });
+  },
+
+  async getMedia(type) {
+    const constraints = {
+      audio: true,
+      video: type === "video" ? { facingMode:"user", width:{ideal:640}, height:{ideal:480} } : false,
+    };
+    this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    return this.localStream;
+  },
+
+  createPC() {
+    this.pc           = new RTCPeerConnection(this.ICE_SERVERS);
+    this.remoteStream = new MediaStream();
+    if (this.localStream) {
+      this.localStream.getTracks().forEach(t => this.pc.addTrack(t, this.localStream));
+    }
+    this.pc.ontrack = (e) => {
+      e.streams[0].getTracks().forEach(t => this.remoteStream.addTrack(t));
+      this.emit("remoteStream", this.remoteStream);
+    };
+    this.pc.onicecandidate = (e) => {
+      if (e.candidate) WS.send({ type:"call_signal", toId:this.peerId, signal:{ type:"ice", candidate:e.candidate } });
+    };
+    this.pc.onconnectionstatechange = () => {
+      const s = this.pc?.connectionState;
+      if (s === "connected")    { this.state = "connected"; this.emit("state","connected"); }
+      if (s === "disconnected" || s === "failed") this.hangup();
+    };
+    return this.pc;
+  },
+
+  async call(peerId, type, myId) {
+    if (this.state !== "idle") return;
+    this.peerId = peerId; this.callType = type; this.state = "calling";
+    try {
+      await this.getMedia(type);
+      this.createPC();
+      const offer = await this.pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:type==="video" });
+      await this.pc.setLocalDescription(offer);
+      WS.send({ type:"call_signal", toId:peerId, fromId:myId, signal:{ type:"offer", sdp:offer, callType:type } });
+      this.emit("state","calling");
+    } catch(err) { this.hangup(); throw err; }
+  },
+
+  async answer(peerId, offer, type) {
+    if (this.state !== "ringing") return;
+    this.peerId = peerId; this.callType = type;
+    try {
+      await this.getMedia(type);
+      this.createPC();
+      await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await this.pc.createAnswer();
+      await this.pc.setLocalDescription(answer);
+      WS.send({ type:"call_signal", toId:peerId, signal:{ type:"answer", sdp:answer } });
+      this.state = "connected"; this.emit("state","connected");
+    } catch(err) { this.hangup(); throw err; }
+  },
+
+  async handleSignal(fromId, signal) {
+    if (signal.type === "offer") {
+      this.peerId = fromId; this.callType = signal.callType || "audio"; this.state = "ringing";
+      this.emit("incoming", { fromId, callType:this.callType, offer:signal });
+      return;
+    }
+    if (signal.type === "answer" && this.pc) {
+      await this.pc.setRemoteDescription(new RTCSessionDescription(signal)); return;
+    }
+    if (signal.type === "ice" && this.pc && signal.candidate) {
+      try { await this.pc.addIceCandidate(new RTCIceCandidate(signal.candidate)); } catch {} return;
+    }
+    if (signal.type === "hangup")  { this.hangup(); return; }
+    if (signal.type === "reject")  { this.hangup(); this.emit("rejected"); return; }
+  },
+
+  reject(peerId) {
+    WS.send({ type:"call_signal", toId:peerId, signal:{ type:"reject" } });
+    this.state = "idle"; this.emit("state","idle");
+  },
+
+  hangup() {
+    if (this.state === "idle") return;
+    if (this.peerId) WS.send({ type:"call_signal", toId:this.peerId, signal:{ type:"hangup" } });
+    this.localStream?.getTracks().forEach(t => t.stop());
+    this.remoteStream?.getTracks().forEach(t => t.stop());
+    this.pc?.close();
+    this.pc = null; this.localStream = null; this.remoteStream = null;
+    this.peerId = null; this.callType = null; this.state = "idle";
+    this.emit("state","idle");
+  },
+
+  toggleMute() {
+    const a = this.localStream?.getAudioTracks()[0];
+    if (a) { a.enabled = !a.enabled; return !a.enabled; } return false;
+  },
+  toggleVideo() {
+    const v = this.localStream?.getVideoTracks()[0];
+    if (v) { v.enabled = !v.enabled; return !v.enabled; } return false;
+  },
+  async flipCamera() {
+    const v = this.localStream?.getVideoTracks()[0];
+    if (!v) return;
+    const facing = v.getSettings().facingMode;
+    const ns = await navigator.mediaDevices.getUserMedia({ audio:true, video:{ facingMode: facing==="user"?"environment":"user" } });
+    const nv = ns.getVideoTracks()[0];
+    const sender = this.pc?.getSenders().find(s => s.track?.kind==="video");
+    if (sender) await sender.replaceTrack(nv);
+    v.stop();
+    this.localStream.removeTrack(v);
+    this.localStream.addTrack(nv);
+    this.emit("localStream", this.localStream);
+  },
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -658,7 +805,7 @@ function ChatListScreen({ identity, contacts, onOpenChat, onSettings, onAddConta
 /* ═══════════════════════════════════════════════════════════════════════════
    SCREEN 5 — CHAT
 ═══════════════════════════════════════════════════════════════════════════ */
-function ChatScreen({ contact, identity, onBack, onDeleteContact }) {
+function ChatScreen({ contact, identity, onBack, onDeleteContact, onVoiceCall, onVideoCall }) {
   const [messages, setMessages] = useState(() => DB.getMessages(contact.id));
   const [input,    setInput]    = useState("");
   const [typing,   setTyping]   = useState(false);
@@ -804,10 +951,12 @@ function ChatScreen({ contact, identity, onBack, onDeleteContact }) {
           </p>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:4, background:`${T.accent}11`, border:`1px solid ${T.accent}22`, borderRadius:8, padding:"4px 8px" }}>
-            <div style={{ width:11, height:11, color:T.accent }}><I.Shield /></div>
-            <span style={{ fontSize:10, color:T.accent, fontWeight:600 }}>E2EE</span>
-          </div>
+          <button onClick={onVoiceCall} style={{ ...S.iconBtn, background:"#00D9A511", borderRadius:12 }} title="Voice call">
+            <div style={{ width:18, height:18, color:T.accent }}><I.Phone /></div>
+          </button>
+          <button onClick={onVideoCall} style={{ ...S.iconBtn, background:"#6C63FF11", borderRadius:12 }} title="Video call">
+            <div style={{ width:18, height:18, color:T.primary }}><I.Video /></div>
+          </button>
           <div style={{ width:8, height:8, borderRadius:"50%", background:wsOnline ? T.accent : T.warning, flexShrink:0 }} />
         </div>
         <div style={{ position:"relative" }}>
@@ -1196,15 +1345,225 @@ function RestoreScreen({ onBack, onRestore }) {
   );
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   INCOMING CALL MODAL
+═══════════════════════════════════════════════════════════════════════════ */
+function IncomingCallModal({ fromId, callType, onAnswer, onReject }) {
+  const [ringing, setRinging] = useState(true);
+
+  useEffect(() => {
+    const t = setInterval(() => setRinging(r => !r), 600);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"#00000099", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:24, backdropFilter:"blur(8px)" }}>
+      <div style={{ background:"#141420", border:"1px solid #2A2A3E", borderRadius:28, padding:"36px 28px", width:"100%", maxWidth:340, textAlign:"center", boxShadow:"0 24px 64px #00000088", animation:"scaleIn 0.3s ease" }}>
+        {/* Animated ring */}
+        <div style={{ position:"relative", width:100, height:100, margin:"0 auto 24px" }}>
+          <div style={{ position:"absolute", inset:-8, borderRadius:"50%", border:"3px solid #6C63FF", opacity:ringing?0.6:0, transition:"opacity 0.3s", animation:"pulse 1.5s infinite" }} />
+          <div style={{ position:"absolute", inset:-18, borderRadius:"50%", border:"2px solid #6C63FF", opacity:ringing?0.3:0, transition:"opacity 0.3s", animation:"pulse 1.5s 0.3s infinite" }} />
+          <Avatar name={fromId} size={100} online={true} />
+        </div>
+
+        <p style={{ fontSize:13, color:"#7B7B9A", marginBottom:6, fontFamily:"'DM Sans',sans-serif" }}>
+          Incoming {callType === "video" ? "Video" : "Voice"} Call
+        </p>
+        <h2 style={{ fontSize:22, fontWeight:700, color:"#F0F0FF", fontFamily:"'Outfit',sans-serif", marginBottom:6 }}>
+          {fromId.slice(0,16)}
+        </h2>
+        <code style={{ fontSize:11, color:"#6C63FF", fontFamily:"'JetBrains Mono',monospace" }}>{fromId}</code>
+
+        <div style={{ display:"flex", gap:20, justifyContent:"center", marginTop:32 }}>
+          {/* Reject */}
+          <button onClick={onReject} style={{ width:64, height:64, borderRadius:"50%", border:"none", cursor:"pointer", background:"linear-gradient(135deg,#FF4F6B,#cc2244)", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 8px 24px #FF4F6B55", transition:"transform 0.15s" }}
+            onMouseEnter={e => e.currentTarget.style.transform="scale(1.1)"}
+            onMouseLeave={e => e.currentTarget.style.transform="scale(1)"}
+          >
+            <div style={{ width:28, height:28, color:"#fff" }}><I.PhoneOff /></div>
+          </button>
+          {/* Answer */}
+          <button onClick={onAnswer} style={{ width:64, height:64, borderRadius:"50%", border:"none", cursor:"pointer", background:"linear-gradient(135deg,#00D9A5,#00b386)", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 8px 24px #00D9A555", transition:"transform 0.15s", animation:`ring 0.5s ${ringing?"":"alternate"} infinite` }}
+            onMouseEnter={e => e.currentTarget.style.transform="scale(1.1)"}
+            onMouseLeave={e => e.currentTarget.style.transform="scale(1)"}
+          >
+            <div style={{ width:28, height:28, color:"#fff" }}><I.Phone /></div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CALL SCREEN
+═══════════════════════════════════════════════════════════════════════════ */
+function CallScreen({ contact, callType, callState, onHangup, identity }) {
+  const localVideoRef  = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const [muted,      setMuted]      = useState(false);
+  const [videoOff,   setVideoOff]   = useState(false);
+  const [speaker,    setSpeaker]    = useState(true);
+  const [duration,   setDuration]   = useState(0);
+  const [connecting, setConnecting] = useState(callState !== "connected");
+  const timerRef = useRef(null);
+
+  // Duration timer
+  useEffect(() => {
+    if (callState === "connected") {
+      setConnecting(false);
+      timerRef.current = setInterval(() => setDuration(d => d + 1), 1000);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [callState]);
+
+  // Attach local stream
+  useEffect(() => {
+    const unsub = RTC.on("localStream", stream => {
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    });
+    if (RTC.localStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = RTC.localStream;
+    }
+    return () => unsub();
+  }, []);
+
+  // Attach remote stream
+  useEffect(() => {
+    const unsub = RTC.on("remoteStream", stream => {
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
+    });
+    if (RTC.remoteStream && remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = RTC.remoteStream;
+    }
+    return () => unsub();
+  }, []);
+
+  const formatDuration = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${sec.toString().padStart(2,"0")}`;
+  };
+
+  const handleMute = () => {
+    const muted = RTC.toggleMute();
+    setMuted(muted);
+  };
+
+  const handleVideo = () => {
+    const off = RTC.toggleVideo();
+    setVideoOff(off);
+  };
+
+  const isVideo = callType === "video";
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"#07070F", zIndex:999, display:"flex", flexDirection:"column" }}>
+      {/* Remote video / avatar */}
+      <div style={{ flex:1, position:"relative", display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(180deg,#0A0A1A,#07070F)" }}>
+        {isVideo ? (
+          <video ref={remoteVideoRef} autoPlay playsInline
+            style={{ width:"100%", height:"100%", objectFit:"cover", opacity:connecting?0.3:1, transition:"opacity 0.5s" }} />
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:16 }}>
+            <div style={{ position:"relative" }}>
+              <div style={{ position:"absolute", inset:-12, borderRadius:"50%", border:"2px solid #6C63FF44", animation:"pulse 2s infinite" }} />
+              <Avatar name={contact.name || contact.id} size={120} online />
+            </div>
+          </div>
+        )}
+
+        {/* Status overlay */}
+        <div style={{ position:"absolute", top:0, left:0, right:0, padding:"48px 24px 16px", background:"linear-gradient(180deg,#00000099 0%,transparent 100%)", textAlign:"center" }}>
+          <p style={{ fontSize:12, color:"#7B7B9A", margin:"0 0 4px", fontFamily:"'DM Sans',sans-serif" }}>
+            {isVideo ? "📹 Video Call" : "📞 Voice Call"} • E2EE 🔐
+          </p>
+          <h2 style={{ fontSize:24, fontWeight:700, color:"#F0F0FF", fontFamily:"'Outfit',sans-serif", margin:"0 0 6px" }}>
+            {contact.name || contact.id.slice(0,16)}
+          </h2>
+          <p style={{ fontSize:14, color: connecting ? "#FFB347" : "#00D9A5", margin:0, fontFamily:"'DM Sans',sans-serif" }}>
+            {connecting ? "Connecting..." : formatDuration(duration)}
+          </p>
+        </div>
+
+        {/* Local video (picture-in-picture) */}
+        {isVideo && (
+          <div style={{ position:"absolute", bottom:120, right:16, width:100, height:140, borderRadius:16, overflow:"hidden", border:"2px solid #2A2A3E", boxShadow:"0 8px 24px #00000066" }}>
+            <video ref={localVideoRef} autoPlay playsInline muted
+              style={{ width:"100%", height:"100%", objectFit:"cover", transform:"scaleX(-1)", opacity:videoOff?0.2:1 }} />
+            {videoOff && (
+              <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:"#141420" }}>
+                <div style={{ width:24, height:24, color:"#7B7B9A" }}><I.VideoOff /></div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Controls */}
+      <div style={{ padding:"20px 24px", paddingBottom:"max(20px,env(safe-area-inset-bottom,20px))", background:"#0A0A0F", borderTop:"1px solid #1A1A2E" }}>
+        <div style={{ display:"flex", justifyContent:"space-evenly", alignItems:"center", marginBottom:24 }}>
+          {/* Mute */}
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:8 }}>
+            <button onClick={handleMute} style={{ width:56, height:56, borderRadius:"50%", border:"none", cursor:"pointer", background:muted?"#FF4F6B22":"#1E1E2E", display:"flex", alignItems:"center", justifyContent:"center", transition:"background 0.2s" }}>
+              <div style={{ width:24, height:24, color:muted?"#FF4F6B":"#F0F0FF" }}>{muted?<I.MicOff/>:<I.Mic/>}</div>
+            </button>
+            <span style={{ fontSize:11, color:"#7B7B9A", fontFamily:"'DM Sans',sans-serif" }}>{muted?"Unmute":"Mute"}</span>
+          </div>
+
+          {/* Hangup */}
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:8 }}>
+            <button onClick={onHangup} style={{ width:72, height:72, borderRadius:"50%", border:"none", cursor:"pointer", background:"linear-gradient(135deg,#FF4F6B,#cc2244)", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 8px 24px #FF4F6B55" }}>
+              <div style={{ width:32, height:32, color:"#fff" }}><I.PhoneOff /></div>
+            </button>
+            <span style={{ fontSize:11, color:"#7B7B9A", fontFamily:"'DM Sans',sans-serif" }}>End</span>
+          </div>
+
+          {/* Video toggle or speaker */}
+          {isVideo ? (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:8 }}>
+              <button onClick={handleVideo} style={{ width:56, height:56, borderRadius:"50%", border:"none", cursor:"pointer", background:videoOff?"#FF4F6B22":"#1E1E2E", display:"flex", alignItems:"center", justifyContent:"center", transition:"background 0.2s" }}>
+                <div style={{ width:24, height:24, color:videoOff?"#FF4F6B":"#F0F0FF" }}>{videoOff?<I.VideoOff/>:<I.Video/>}</div>
+              </button>
+              <span style={{ fontSize:11, color:"#7B7B9A", fontFamily:"'DM Sans',sans-serif" }}>{videoOff?"Cam Off":"Camera"}</span>
+            </div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:8 }}>
+              <button onClick={() => setSpeaker(!speaker)} style={{ width:56, height:56, borderRadius:"50%", border:"none", cursor:"pointer", background:speaker?"#6C63FF22":"#1E1E2E", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <div style={{ width:24, height:24, color:speaker?"#6C63FF":"#F0F0FF" }}><I.Speaker /></div>
+              </button>
+              <span style={{ fontSize:11, color:"#7B7B9A", fontFamily:"'DM Sans',sans-serif" }}>Speaker</span>
+            </div>
+          )}
+        </div>
+
+        {/* Extra controls for video */}
+        {isVideo && (
+          <div style={{ display:"flex", justifyContent:"center", gap:16 }}>
+            <button onClick={() => RTC.flipCamera()} style={{ width:44, height:44, borderRadius:14, border:"1px solid #2A2A3E", cursor:"pointer", background:"#141420", display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <div style={{ width:20, height:20, color:"#7B7B9A" }}><I.CamFlip /></div>
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    ROOT APP
 ═══════════════════════════════════════════════════════════════════════════ */
 export default function App() {
-  const [screen,   setScreen]   = useState("welcome");
-  const [identity, setIdentity] = useState(null);
-  const [contact,  setContact]  = useState(null);
-  const [contacts, setContacts] = useState([]);
-  const [booting,  setBooting]  = useState(true);
+  const [screen,       setScreen]       = useState("welcome");
+  const [identity,     setIdentity]     = useState(null);
+  const [contact,      setContact]      = useState(null);
+  const [contacts,     setContacts]     = useState([]);
+  const [booting,      setBooting]      = useState(true);
+  const [callState,    setCallState]    = useState("idle"); // idle|calling|ringing|connected
+  const [callContact,  setCallContact]  = useState(null);
+  const [callType,     setCallType]     = useState(null);
+  const [incomingCall, setIncomingCall] = useState(null);
 
   // ── Boot ──
   useEffect(() => {
@@ -1223,6 +1582,24 @@ export default function App() {
         setScreen("chats");
         WS.connect(saved.shortId);
         WS.register(saved);
+
+        // Listen for incoming calls
+        RTC.on("incoming", ({ fromId, callType }) => {
+          setIncomingCall({ fromId, callType });
+        });
+        RTC.on("state", (s) => {
+          setCallState(s);
+          if (s === "idle") {
+            setIncomingCall(null);
+            setCallContact(null);
+            setCallType(null);
+          }
+        });
+        RTC.on("rejected", () => {
+          setCallState("idle");
+          setCallContact(null);
+          alert("Call rejected");
+        });
       } else {
         DB.clear();
         setScreen("welcome");
@@ -1240,7 +1617,12 @@ export default function App() {
   useEffect(() => {
     if (!identity) return;
     const unsub = WS.on("message", data => {
-      if (data.type !== "message" || !data.fromId) return;
+      // Route call signals to RTC manager
+    if (data.type === "call_signal" && data.fromId) {
+      RTC.handleSignal(data.fromId, data.signal || {});
+      return;
+    }
+    if (data.type !== "message" || !data.fromId) return;
       let text = data.payload?.ciphertext || "";
       text = decryptText(text);
       const msg = {
@@ -1306,11 +1688,40 @@ export default function App() {
     doRestore:  () => { setContact(null); setScreen("chats"); },
     resetApp:   () => {
       WS.disconnect();
+      RTC.hangup();
       localStorage.clear();
       setIdentity(null);
       setContact(null);
       setContacts([]);
       setScreen("welcome");
+    },
+    startCall: (c, type) => {
+      setCallContact(c);
+      setCallType(type);
+      setCallState("calling");
+      RTC.call(c.id, type, identity?.shortId).catch(err => {
+        alert(`Call failed: ${err.message}`);
+        setCallState("idle");
+        setCallContact(null);
+      });
+    },
+    answerCall: () => {
+      if (!incomingCall) return;
+      setCallContact({ id:incomingCall.fromId, name:incomingCall.fromId.slice(0,16) });
+      setCallType(incomingCall.callType);
+      setCallState("connected");
+      setIncomingCall(null);
+      RTC.answer(incomingCall.fromId, incomingCall.offer, incomingCall.callType);
+    },
+    rejectCall: () => {
+      if (incomingCall) RTC.reject(incomingCall.fromId);
+      setIncomingCall(null);
+    },
+    hangup: () => {
+      RTC.hangup();
+      setCallState("idle");
+      setCallContact(null);
+      setCallType(null);
     },
   };
 
@@ -1329,6 +1740,8 @@ export default function App() {
     @keyframes scanLine { 0%{transform:translateY(-100%);} 100%{transform:translateY(600%);} }
     @keyframes spin     { to{transform:rotate(360deg);} }
     @keyframes fadeIn   { from{opacity:0;} to{opacity:1;} }
+    @keyframes scaleIn  { from{opacity:0;transform:scale(0.85);} to{opacity:1;transform:scale(1);} }
+    @keyframes ring     { 0%,100%{transform:rotate(-8deg);} 50%{transform:rotate(8deg);} }
   `;
 
   if (booting) {
@@ -1354,11 +1767,32 @@ export default function App() {
         {screen === "keygen"     && <KeyGenScreen     onDone={go.afterKeygen} />}
         {screen === "yourid"     && identity          && <YourIdScreen    identity={identity} onContinue={go.toChats} />}
         {screen === "chats"      &&                     <ChatListScreen   identity={identity} contacts={contacts} onOpenChat={go.openChat} onSettings={go.toSettings} onAddContact={go.toAdd} />}
-        {screen === "chat"       && contact?.id       && <ChatScreen      contact={contact} identity={identity} onBack={go.back} onDeleteContact={go.deleteContact} />}
+        {screen === "chat"       && contact?.id       && <ChatScreen      contact={contact} identity={identity} onBack={go.back} onDeleteContact={go.deleteContact} onVoiceCall={()=>go.startCall(contact,"audio")} onVideoCall={()=>go.startCall(contact,"video")} />}
         {screen === "settings"   &&                     <SettingsScreen   identity={identity} onBack={go.back} onReset={go.resetApp} />}
         {screen === "addcontact" &&                     <AddContactScreen onBack={go.back} onAdd={go.addContact} myId={identity?.shortId} />}
         {screen === "restore"    &&                     <RestoreScreen    onBack={() => setScreen("welcome")} onRestore={go.doRestore} />}
       </div>
+
+      {/* Incoming call modal */}
+      {incomingCall && (
+        <IncomingCallModal
+          fromId={incomingCall.fromId}
+          callType={incomingCall.callType}
+          onAnswer={go.answerCall}
+          onReject={go.rejectCall}
+        />
+      )}
+
+      {/* Active call screen */}
+      {(callState === "calling" || callState === "connected") && callContact && (
+        <CallScreen
+          contact={callContact}
+          callType={callType}
+          callState={callState}
+          identity={identity}
+          onHangup={go.hangup}
+        />
+      )}
     </>
   );
 }
