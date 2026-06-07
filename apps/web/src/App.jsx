@@ -110,8 +110,10 @@ const WS = {
         this.reconnectDelay = 1000;
         this.emit("status", "online");
         this._startHeartbeat();
-        this._fetchPending();
-        this.startPolling(); // poll for missed messages
+        this._fetchPending(); // immediately fetch any pending
+        // If already in a call, use fast polling
+        const inCall = ["calling","connecting","connected"].includes(RTC.state);
+        this.startPolling(inCall);
       };
       this.socket.onmessage = (e) => {
         try {
@@ -226,15 +228,24 @@ const WS = {
       const res  = await fetch(`${API_URL}/pending?id=${this.shortId}`);
       if (!res.ok) return;
       const body = await res.json();
-      const msgs = body.messages || [];
-      msgs.forEach(msg => this.emit("message", { type:"message", ...msg }));
+
+      // Deliver chat messages
+      (body.messages || []).forEach(msg =>
+        this.emit("message", { type:"message", ...msg })
+      );
+
+      // Deliver call signals + receipts (sorted oldest first)
+      (body.signals || []).forEach(item =>
+        this.emit("message", item)
+      );
     } catch {}
   },
 
-  // Start polling for missed messages every 4 seconds
-  startPolling() {
+  // Start polling — faster during calls for ICE/SDP delivery
+  startPolling(fast = false) {
     this.stopPolling();
-    this.pollTimer = setInterval(() => this._fetchPending(), 4000);
+    const interval = fast ? 1000 : 4000;
+    this.pollTimer = setInterval(() => this._fetchPending(), interval);
   },
 
   stopPolling() {
@@ -356,12 +367,21 @@ const RTC = {
   },
 
   async getMedia(type) {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Camera/Mic not supported on this browser");
+    }
     const constraints = {
-      audio: true,
+      audio: { echoCancellation:true, noiseSuppression:true, sampleRate:48000 },
       video: type === "video" ? { facingMode:"user", width:{ideal:640}, height:{ideal:480} } : false,
     };
-    this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
-    return this.localStream;
+    try {
+      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      return this.localStream;
+    } catch(err) {
+      if (err.name === "NotAllowedError") throw new Error("Please allow Camera/Microphone access");
+      if (err.name === "NotFoundError")   throw new Error("No Camera/Microphone found on device");
+      throw new Error(`Media error: ${err.message}`);
+    }
   },
 
   createPC() {
@@ -379,8 +399,15 @@ const RTC = {
     };
     this.pc.onconnectionstatechange = () => {
       const s = this.pc?.connectionState;
+      console.debug("[RTC] connectionState:", s);
       if (s === "connected")    { this.state = "connected"; this.emit("state","connected"); }
       if (s === "disconnected" || s === "failed") this.hangup();
+    };
+    this.pc.oniceconnectionstatechange = () => {
+      console.debug("[RTC] iceConnectionState:", this.pc?.iceConnectionState);
+    };
+    this.pc.onsignalingstatechange = () => {
+      console.debug("[RTC] signalingState:", this.pc?.signalingState);
     };
     return this.pc;
   },
@@ -1684,9 +1711,14 @@ export default function App() {
         setIncomingCall(null);
         setCallContact(null);
         setCallType(null);
+        WS.startPolling(false); // restore normal polling
       }
       if (s === "connected") {
-        setIncomingCall(null); // clear modal when connected
+        setIncomingCall(null);
+        WS.startPolling(true); // keep fast polling when connected
+      }
+      if (s === "calling" || s === "connecting") {
+        WS.startPolling(true); // fast poll during negotiation
       }
     });
 
@@ -1769,9 +1801,11 @@ export default function App() {
       setCallContact(c);
       setCallType(type);
       setCallState("calling");
+      WS.startPolling(true); // fast poll during call
       RTC.call(c.id, type, identity?.shortId).catch(err => {
         alert(`Call failed: ${err.message}`);
         RTC.hangup();
+        WS.startPolling(false); // back to normal poll
         setCallState("idle");
         setCallContact(null);
       });
@@ -1786,9 +1820,11 @@ export default function App() {
       setCallState("connecting"); // show connecting state while WebRTC negotiates
       setIncomingCall(null);
       // RTC state listener will set "connected" when PC connects
+      WS.startPolling(true); // fast poll during call
       RTC.answer(fromId, offer?.sdp ? offer : { sdp:offer }, callType)
         .catch(err => {
           alert(`Could not answer: ${err.message}`);
+          WS.startPolling(false);
           setCallState("idle");
           setCallContact(null);
         });
@@ -1799,6 +1835,7 @@ export default function App() {
     },
     hangup: () => {
       RTC.hangup();
+      WS.startPolling(false); // restore normal poll
       setCallState("idle");
       setCallContact(null);
       setCallType(null);

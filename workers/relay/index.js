@@ -1,6 +1,6 @@
 /**
- * Uraiadal Relay Worker v3
- * KV-first delivery — 100% reliable on free plan
+ * Uraiadal Relay Worker v4
+ * KV-first for ALL signal types — guaranteed delivery
  * Durable Objects for live WebSocket sessions
  */
 
@@ -12,7 +12,6 @@ export class UserSession {
 
   async fetch(request) {
     const url = new URL(request.url);
-
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWebSocket(request, url);
     }
@@ -27,7 +26,6 @@ export class UserSession {
     if (!shortId?.startsWith("urai_")) {
       return new Response("Invalid ID", { status: 400 });
     }
-
     const [client, server] = Object.values(new WebSocketPair());
     this.state.acceptWebSocket(server, [shortId]);
 
@@ -38,23 +36,33 @@ export class UserSession {
       { expirationTtl: 120 }
     );
 
+    // Flush ALL pending items (messages + call signals)
+    const pending = await this.env.REGISTRY.list({ prefix: `pending:${shortId}:` });
+    for (const key of pending.keys) {
+      const val = await this.env.REGISTRY.get(key.name);
+      if (val) {
+        server.send(val);
+        await this.env.REGISTRY.delete(key.name);
+      }
+    }
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(ws, message) {
-    // Size limit — prevent KV abuse
-    if (message.length > 65536) return;
+  async webSocketMessage(ws, rawMsg) {
+    // Size guard
+    if (rawMsg.length > 65536) return;
 
-    const tags    = this.state.getTags(ws);
-    const fromId  = tags[0];
+    const tags   = this.state.getTags(ws);
+    const fromId = tags[0];
     if (!fromId) return;
 
     let data;
-    try { data = JSON.parse(message); } catch { return; }
+    try { data = JSON.parse(rawMsg); } catch { return; }
 
     const { type } = data;
 
-    // ── Heartbeat ──
+    // ── Heartbeat ──────────────────────────────────────────────────────────
     if (type === "heartbeat") {
       await this.env.REGISTRY.put(
         `online:${fromId}`,
@@ -65,117 +73,102 @@ export class UserSession {
       return;
     }
 
-    // ── Message: KV-first then live ──
+    // ── Chat message ───────────────────────────────────────────────────────
     if (type === "message") {
       const { toId, messageId, payload, msgType, timestamp } = data;
       if (!toId || !messageId) return;
 
+      // Rate limit: 60 msgs/min per sender
+      const rlKey   = `rl:${fromId}`;
+      const rlCount = parseInt(await this.env.REGISTRY.get(rlKey) || "0");
+      if (rlCount > 60) {
+        ws.send(JSON.stringify({ type:"error", message:"Rate limited" }));
+        return;
+      }
+      await this.env.REGISTRY.put(rlKey, String(rlCount + 1), { expirationTtl: 60 });
+
       const envelope = JSON.stringify({
-        type:      "message",
-        messageId,
-        fromId,
-        toId,
-        payload,
-        msgType:   msgType || "text",
+        type: "message", messageId, fromId, toId,
+        payload, msgType: msgType || "text",
         timestamp: timestamp || Date.now(),
       });
 
-      // Rate limit: max 60 messages per minute per sender
-    const rlKey   = `rl:${fromId}`;
-    const rlCount = parseInt(await this.env.REGISTRY.get(rlKey) || "0");
-    if (rlCount > 60) {
-      ws.send(JSON.stringify({ type:"error", message:"Rate limited — slow down" }));
-      return;
-    }
-    await this.env.REGISTRY.put(rlKey, String(rlCount + 1), { expirationTtl: 60 });
+      // Always store first (7 day TTL)
+      const kvKey = `pending:${toId}:msg_${messageId}`;
+      await this.env.REGISTRY.put(kvKey, envelope, { expirationTtl: 604800 });
 
-    // Step 1: Store in KV ALWAYS (guarantees polling delivery)
-      await this.env.REGISTRY.put(
-        `msg:${toId}:${messageId}`,
-        envelope,
-        { expirationTtl: 604800 }
-      );
+      // Attempt live delivery
+      const delivered = await this._deliverLive(toId, envelope);
+      if (delivered) await this.env.REGISTRY.delete(kvKey);
 
-      // Step 2: Try live delivery too (faster)
-      let delivered = false;
-      try {
-        const recipDO = this.env.USER_SESSION.get(
-          this.env.USER_SESSION.idFromName(toId)
-        );
-        const res = await recipDO.fetch(
-          new Request("https://relay/deliver", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: envelope,
-          })
-        );
-        if (res.ok && (await res.text()) === "ok") {
-          delivered = true;
-          // Remove from KV since live delivered
-          await this.env.REGISTRY.delete(`msg:${toId}:${messageId}`);
-        }
-      } catch {}
-
-      // Step 3: Send receipt to sender
       ws.send(JSON.stringify({
-        type:      "receipt",
-        messageId,
-        status:    delivered ? "delivered" : "sent",
+        type: "receipt", messageId,
+        status: delivered ? "delivered" : "sent",
       }));
       return;
     }
 
-    // ── Receipt ──
+    // ── Receipts ───────────────────────────────────────────────────────────
     if (type === "receipt") {
       const { toId, messageId, status } = data;
       if (!toId) return;
-      try {
-        const recipDO = this.env.USER_SESSION.get(
-          this.env.USER_SESSION.idFromName(toId)
-        );
-        await recipDO.fetch(new Request("https://relay/deliver", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "receipt", messageId, fromId, status }),
-        }));
-      } catch {}
+      const envelope = JSON.stringify({ type:"receipt", messageId, fromId, status });
+      const kvKey    = `pending:${toId}:rcpt_${messageId}_${Date.now()}`;
+      await this.env.REGISTRY.put(kvKey, envelope, { expirationTtl: 86400 });
+      const ok = await this._deliverLive(toId, envelope);
+      if (ok) await this.env.REGISTRY.delete(kvKey);
       return;
     }
 
-    // ── Typing ──
+    // ── Typing ─────────────────────────────────────────────────────────────
     if (type === "typing") {
       const { toId, isTyping } = data;
       if (!toId) return;
-      try {
-        const recipDO = this.env.USER_SESSION.get(
-          this.env.USER_SESSION.idFromName(toId)
-        );
-        await recipDO.fetch(new Request("https://relay/deliver", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "typing", fromId, isTyping }),
-        }));
-      } catch {}
+      // Typing is ephemeral — live only, no KV
+      await this._deliverLive(toId,
+        JSON.stringify({ type:"typing", fromId, isTyping })
+      );
       return;
     }
 
-    // ── Call signaling (WebRTC SDP + ICE) ──
+    // ── Call signaling ─────────────────────────────────────────────────────
     if (type === "call_signal") {
       const { toId, signal } = data;
       if (!toId || !signal) return;
-      // Call signals delivered live only (no KV storage — time-sensitive)
-      try {
-        const recipDO = this.env.USER_SESSION.get(
-          this.env.USER_SESSION.idFromName(toId)
-        );
-        await recipDO.fetch(new Request("https://relay/deliver", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "call_signal", fromId, signal }),
-        }));
-      } catch {}
+
+      const envelope = JSON.stringify({ type:"call_signal", fromId, signal });
+      const sigType  = signal.type || "unknown";
+
+      // offer + answer + hangup + reject → store in KV (short TTL 2 min)
+      // ice candidates → live only (stale ICE is useless)
+      if (sigType !== "ice") {
+        const kvKey = `pending:${toId}:call_${sigType}_${Date.now()}`;
+        await this.env.REGISTRY.put(kvKey, envelope, { expirationTtl: 120 });
+        const ok = await this._deliverLive(toId, envelope);
+        if (ok) await this.env.REGISTRY.delete(kvKey);
+      } else {
+        // ICE — live only
+        await this._deliverLive(toId, envelope);
+      }
       return;
     }
+  }
+
+  // Deliver to recipient's active WebSocket via their DO instance
+  async _deliverLive(toId, envelope) {
+    try {
+      const recipDO = this.env.USER_SESSION.get(
+        this.env.USER_SESSION.idFromName(toId)
+      );
+      const res = await recipDO.fetch(
+        new Request("https://relay/deliver", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    envelope,
+        })
+      );
+      return res.ok && (await res.text()) === "ok";
+    } catch { return false; }
   }
 
   async webSocketClose(ws) {
@@ -202,7 +195,8 @@ export class UserSession {
 // ── Main Worker ──────────────────────────────────────────────────────────────
 export default {
   async fetch(request, env) {
-    const url  = new URL(request.url);
+    const url = new URL(request.url);
+
     const allowedOrigins = [
       "https://uraiadal.pages.dev",
       "http://localhost:5173",
@@ -225,10 +219,12 @@ export default {
         headers: { ...cors, "Content-Type": "application/json" },
       });
 
-    // WebSocket
+    // WebSocket upgrade
     if (url.pathname === "/ws") {
       const shortId = url.searchParams.get("id");
-      if (!shortId?.startsWith("urai_")) return new Response("Invalid ID", { status: 400 });
+      if (!shortId?.startsWith("urai_")) {
+        return new Response("Invalid ID", { status: 400 });
+      }
       const doId = env.USER_SESSION.idFromName(shortId);
       return env.USER_SESSION.get(doId).fetch(request);
     }
@@ -237,28 +233,28 @@ export default {
     if (url.pathname === "/register" && request.method === "POST") {
       try {
         const { shortId, signingPubKey, exchangePubKey } = await request.json();
-        if (!shortId?.startsWith("urai_")) return json({ error: "Invalid ID" }, 400);
+        if (!shortId?.startsWith("urai_")) return json({ error:"Invalid ID" }, 400);
         await env.REGISTRY.put(`user:${shortId}`, JSON.stringify({
           shortId, signingPubKey, exchangePubKey, ts: Date.now(),
         }));
-        return json({ success: true, shortId });
-      } catch { return json({ error: "Bad request" }, 400); }
+        return json({ success:true, shortId });
+      } catch { return json({ error:"Bad request" }, 400); }
     }
 
     // Lookup pubkeys
     if (url.pathname.startsWith("/lookup/")) {
       const shortId = url.pathname.replace("/lookup/", "");
       const data    = await env.REGISTRY.get(`user:${shortId}`);
-      if (!data) return json({ error: "Not found" }, 404);
+      if (!data) return json({ error:"Not found" }, 404);
       return json(JSON.parse(data));
     }
 
-    // Pending messages (KV polling)
+    // Pending — fetch all queued items (messages + call signals)
     if (url.pathname === "/pending") {
       const shortId = url.searchParams.get("id");
-      if (!shortId) return json({ messages: [] });
-      const list = await env.REGISTRY.list({ prefix: `msg:${shortId}:` });
-      const messages = await Promise.all(
+      if (!shortId) return json({ messages:[] });
+      const list = await env.REGISTRY.list({ prefix:`pending:${shortId}:` });
+      const items = await Promise.all(
         list.keys.map(async k => {
           const val = await env.REGISTRY.get(k.name);
           if (val) {
@@ -268,21 +264,26 @@ export default {
           return null;
         })
       );
-      return json({ messages: messages.filter(Boolean) });
+      // Separate chat messages from other signals
+      const all = items.filter(Boolean);
+      return json({
+        messages: all.filter(i => i.type === "message"),
+        signals:  all.filter(i => i.type !== "message"),
+      });
     }
 
     // Online status
     if (url.pathname.startsWith("/online/")) {
       const shortId = url.pathname.replace("/online/", "");
       const data    = await env.REGISTRY.get(`online:${shortId}`);
-      return json({ online: !!data, lastSeen: data ? JSON.parse(data).ts : null });
+      return json({ online:!!data, lastSeen: data ? JSON.parse(data).ts : null });
     }
 
     // Health
     if (url.pathname === "/health") {
-      return json({ status:"ok", service:"Uraiadal Relay", version:"3.0.0", timestamp:Date.now() });
+      return json({ status:"ok", service:"Uraiadal Relay", version:"4.0.0", timestamp:Date.now() });
     }
 
-    return new Response("Uraiadal Relay v3.0", { headers: cors });
+    return new Response("Uraiadal Relay v4.0", { headers:cors });
   }
 };
