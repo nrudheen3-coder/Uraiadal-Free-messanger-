@@ -165,11 +165,15 @@ function createPC() {
   pc.onicecandidate = e => {
     if (!e.candidate) { log('🧊 ICE gathering complete', 'ok'); return; }
     log('🧊 ICE candidate: ' + e.candidate.type, 'gray');
-    batch.push(e.candidate);
+    // toJSON() converts RTCIceCandidate to plain serializable object
+    batch.push(e.candidate.toJSON ? e.candidate.toJSON() : e.candidate);
     clearTimeout(batchTimer);
     batchTimer = setTimeout(async () => {
-      await sendSignal($('theirId').value.trim(), { type:'ice', candidates: batch });
-      batch = [];
+      if (batch.length > 0) {
+        log('📤 Sending ' + batch.length + ' ICE candidate(s)', 'info');
+        await sendSignal($('theirId').value.trim(), { type:'ice', candidates: batch });
+        batch = [];
+      }
     }, 200);
   };
 

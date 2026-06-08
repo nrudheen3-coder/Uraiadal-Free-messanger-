@@ -283,17 +283,35 @@ export default {
     // POST /signal — store signal for recipient
     if (url.pathname === "/signal" && request.method === "POST") {
       try {
-        const { fromId, toId, signal } = await request.json();
-        if (!fromId || !toId || !signal) return json({ error:"Missing fields" }, 400);
-        if (!fromId.startsWith("urai_") || !toId.startsWith("urai_")) {
+        // Parse body — accept any valid JSON
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error:"Invalid JSON" }, 400); }
+
+        const { fromId, toId, signal } = body;
+
+        // Basic presence check
+        if (!fromId || !toId || !signal) {
+          return json({ error:"Missing fields" }, 400);
+        }
+
+        // ID format check
+        if (!String(fromId).startsWith("urai_") || !String(toId).startsWith("urai_")) {
           return json({ error:"Invalid IDs" }, 400);
         }
-        // Signal type determines TTL
-        // offer/answer/reject/hangup: 2 minutes
-        // ice candidates: 30 seconds (stale ICE useless)
+
+        // Signal must have a type
+        if (!signal.type) {
+          return json({ error:"Signal missing type" }, 400);
+        }
+
+        // TTL: ICE=30s, offer/answer/hangup/reject=120s
         const ttl = signal.type === "ice" ? 30 : 120;
+
+        // Store signal — serialize safely
+        const envelope = JSON.stringify({ fromId, signal, ts:Date.now() });
         const key = `sig:${toId}:${signal.type}_${fromId}_${Date.now()}`;
-        await env.REGISTRY.put(key, JSON.stringify({ fromId, signal, ts:Date.now() }), { expirationTtl:ttl });
+        await env.REGISTRY.put(key, envelope, { expirationTtl:ttl });
 
         // also attempt live WS delivery
         try {

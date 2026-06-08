@@ -435,10 +435,17 @@ const RTC = {
     // Batch ICE candidates for efficiency
     this.pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-      this._iceBatch.push(e.candidate);
+      // toJSON() converts RTCIceCandidate to plain serializable object
+      const c = e.candidate.toJSON ? e.candidate.toJSON() : {
+        candidate: e.candidate.candidate,
+        sdpMid: e.candidate.sdpMid,
+        sdpMLineIndex: e.candidate.sdpMLineIndex,
+        usernameFragment: e.candidate.usernameFragment,
+      };
+      this._iceBatch.push(c);
       clearTimeout(this._iceBatchTimer);
       this._iceBatchTimer = setTimeout(() => {
-        if (this._iceBatch.length > 0) {
+        if (this._iceBatch.length > 0 && this.peerId) {
           this._sendSignal(this.peerId, { type:"ice", candidates: this._iceBatch });
           this._iceBatch = [];
         }
