@@ -478,20 +478,45 @@ const RTC = {
       await this.getMedia(type);
       this._createPC();
 
-      const offer = await this.pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: type === "video",
-      });
-      await this.pc.setLocalDescription(offer);
+      // Collect ICE candidates before sending offer
+      // This avoids race condition where ICE arrives before offer
+      await new Promise((resolve) => {
+        const offer_promise = this.pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: type === "video",
+        });
+        offer_promise.then(async (offer) => {
+          await this.pc.setLocalDescription(offer);
 
-      await this._sendSignal(peerId, {
-        type:     "offer",
-        sdp:      offer.sdp,
-        callType: type,
+          // Wait for ICE gathering to complete or 2s timeout
+          if (this.pc.iceGatheringState !== "complete") {
+            await new Promise(res => {
+              const timer = setTimeout(res, 2000);
+              this.pc.onicegatheringstatechange = () => {
+                if (this.pc.iceGatheringState === "complete") {
+                  clearTimeout(timer);
+                  res();
+                }
+              };
+            });
+          }
+
+          // Send offer with all gathered ICE embedded (trickle=false approach)
+          // This way offer + ICE arrive together
+          await this._sendSignal(peerId, {
+            type:     "offer",
+            sdp:      this.pc.localDescription.sdp, // use final SDP with ICE
+            callType: type,
+          });
+
+          // Clear ICE batch — already in SDP
+          this._iceBatch = [];
+          resolve();
+        });
       });
 
       this.emit("state","calling");
-      this._startPoll(); // poll for answer + ICE
+      this._startPoll(); // poll for answer
 
       // 45s timeout
       this._callTimeout = setTimeout(() => {
@@ -525,10 +550,29 @@ const RTC = {
       const answer = await this.pc.createAnswer();
       await this.pc.setLocalDescription(answer);
 
-      await this._sendSignal(peerId, { type:"answer", sdp:answer.sdp });
+      // Wait for ICE gathering before sending answer
+      if (this.pc.iceGatheringState !== "complete") {
+        await new Promise(res => {
+          const timer = setTimeout(res, 2000);
+          this.pc.onicegatheringstatechange = () => {
+            if (this.pc.iceGatheringState === "complete") {
+              clearTimeout(timer); res();
+            }
+          };
+        });
+      }
+
+      // Send answer with all ICE embedded in SDP
+      await this._sendSignal(peerId, {
+        type: "answer",
+        sdp:  this.pc.localDescription.sdp,
+      });
+
+      // Clear ICE batch — already in SDP
+      this._iceBatch = [];
 
       this.emit("state","connecting");
-      this._startPoll(); // poll for ICE candidates
+      this._startPoll(); // poll for any trickle ICE from caller
     } catch(err) {
       this.hangup();
       throw err;

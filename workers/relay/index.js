@@ -300,17 +300,15 @@ export default {
           return json({ error:"Invalid IDs" }, 400);
         }
 
-        // Signal must have a type
-        if (!signal.type) {
-          return json({ error:"Signal missing type" }, 400);
-        }
+        // Accept any signal with a type string, or default to "unknown"
+        const sigType = signal.type || "unknown";
 
         // TTL: ICE=30s, offer/answer/hangup/reject=120s
-        const ttl = signal.type === "ice" ? 30 : 120;
+        const ttl = sigType === "ice" ? 30 : 120;
 
         // Store signal — serialize safely
         const envelope = JSON.stringify({ fromId, signal, ts:Date.now() });
-        const key = `sig:${toId}:${signal.type}_${fromId}_${Date.now()}`;
+        const key = `sig:${toId}:${sigType}_${fromId}_${Date.now()}`;
         await env.REGISTRY.put(key, envelope, { expirationTtl:ttl });
 
         // also attempt live WS delivery

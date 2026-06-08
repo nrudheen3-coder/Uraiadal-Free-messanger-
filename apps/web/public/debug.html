@@ -245,9 +245,18 @@ async function answerCall(fromId, signal) {
     await pc.setLocalDescription(answer);
     log('📋 Local description set (answer)', 'ok');
 
-    await sendSignal(fromId, { type:'answer', sdp:answer.sdp });
-    log('📤 Answer sent', 'ok');
-
+    // Wait for ICE gathering then send answer with ICE embedded
+    log('🧊 Gathering ICE candidates...', 'gray');
+    await new Promise(res => {
+      if (pc.iceGatheringState === 'complete') { res(); return; }
+      const t = setTimeout(res, 2000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); }
+      };
+    });
+    log('🧊 ICE done — sending answer with ICE embedded', 'ok');
+    await sendSignal(fromId, { type:'answer', sdp:pc.localDescription.sdp });
+    log('📤 Answer sent (with ICE embedded in SDP)', 'ok');
     startPolling();
   } catch(e) { log('❌ Answer failed: ' + e.message, 'err'); }
 }
