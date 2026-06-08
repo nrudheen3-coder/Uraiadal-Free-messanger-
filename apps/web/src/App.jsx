@@ -1852,7 +1852,7 @@ export default function App() {
         WS.connect(id.shortId);
         WS.register(id);
       } else {
-        setScreen("welcome");
+        setScreen("welcome"); // fallback if save failed
       }
     },
     toChats:    () => { setContact(null); setScreen("chats"); },
