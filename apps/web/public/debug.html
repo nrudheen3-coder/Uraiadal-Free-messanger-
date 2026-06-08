@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Uraiadal Call Debug</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0A0A0F; color:#F0F0FF; font-family:'DM Sans',sans-serif; padding:16px; }
+h1 { color:#6C63FF; margin-bottom:16px; font-size:18px; }
+.section { background:#141420; border:1px solid #2A2A3E; border-radius:12px; padding:14px; margin-bottom:12px; }
+.section h2 { font-size:13px; color:#7B7B9A; margin-bottom:10px; text-transform:uppercase; letter-spacing:1px; }
+input { width:100%; background:#0A0A0F; border:1px solid #2A2A3E; border-radius:8px; padding:10px; color:#F0F0FF; font-size:13px; margin-bottom:8px; outline:none; font-family:monospace; }
+button { padding:10px 16px; border-radius:10px; border:none; cursor:pointer; font-size:13px; font-weight:600; margin:4px 4px 4px 0; }
+.btn-p { background:#6C63FF; color:#fff; }
+.btn-g { background:#00D9A5; color:#000; }
+.btn-r { background:#FF4F6B; color:#fff; }
+.btn-y { background:#FFB347; color:#000; }
+#log { background:#070710; border:1px solid #1A1A2E; border-radius:10px; padding:12px; height:300px; overflow-y:auto; font-family:monospace; font-size:11px; line-height:1.6; }
+.log-ok  { color:#00D9A5; }
+.log-err { color:#FF4F6B; }
+.log-warn{ color:#FFB347; }
+.log-info{ color:#6C63FF; }
+.log-gray{ color:#7B7B9A; }
+</style>
+</head>
+<body>
+<h1>🔐 Uraiadal Call Debugger</h1>
+
+<div class="section">
+  <h2>Config</h2>
+  <input id="relayUrl" value="https://uraiadal-relay.nrudheen3.workers.dev" placeholder="Relay URL">
+  <input id="myId" placeholder="Your ID (e.g. urai_xxxxxxxxxx)">
+  <input id="theirId" placeholder="Their ID (e.g. urai_xxxxxxxxxx)">
+</div>
+
+<div class="section">
+  <h2>Actions</h2>
+  <button class="btn-p" onclick="testRelay()">🔍 Test Relay</button>
+  <button class="btn-g" onclick="startCall('audio')">📞 Voice Call</button>
+  <button class="btn-g" onclick="startCall('video')">📹 Video Call</button>
+  <button class="btn-y" onclick="pollSignals()">📡 Poll Signals</button>
+  <button class="btn-r" onclick="hangup()">📵 Hangup</button>
+  <button onclick="clearLog()" style="background:#1A1A2E;color:#7B7B9A">🗑 Clear</button>
+</div>
+
+<div class="section">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<div class="section">
+  <h2>Media</h2>
+  <div style="display:flex;gap:8px">
+    <video id="localVideo"  autoplay playsinline muted style="width:48%;background:#1A1A2E;border-radius:8px;min-height:120px"></video>
+    <video id="remoteVideo" autoplay playsinline      style="width:48%;background:#1A1A2E;border-radius:8px;min-height:120px"></video>
+  </div>
+  <p style="font-size:11px;color:#555;margin-top:6px">Local (left) · Remote (right)</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let pc = null, localStream = null, polling = null, myId = null, theirId = null;
+
+function log(msg, type='info') {
+  const d = $('log');
+  const t = new Date().toLocaleTimeString();
+  const cls = {ok:'log-ok',err:'log-err',warn:'log-warn',info:'log-info',gray:'log-gray'}[type]||'log-info';
+  d.innerHTML += `<div class="${cls}">[${t}] ${msg}</div>`;
+  d.scrollTop = d.scrollHeight;
+}
+function clearLog() { $('log').innerHTML = ''; }
+
+function getRelay() { return $('relayUrl').value.trim(); }
+
+async function testRelay() {
+  log('Testing relay...', 'info');
+  try {
+    const r = await fetch(getRelay() + '/health');
+    const d = await r.json();
+    log(`✅ Relay OK — version ${d.version}`, 'ok');
+  } catch(e) { log('❌ Relay unreachable: ' + e.message, 'err'); }
+}
+
+async function sendSignal(toId, signal) {
+  const fromId = $('myId').value.trim();
+  try {
+    const r = await fetch(getRelay() + '/signal', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ fromId, toId, signal })
+    });
+    const d = await r.json();
+    if (d.success) log(`📤 Signal sent: ${signal.type}`, 'ok');
+    else log(`❌ Signal failed: ${JSON.stringify(d)}`, 'err');
+  } catch(e) { log('❌ sendSignal error: ' + e.message, 'err'); }
+}
+
+async function pollSignals() {
+  myId = $('myId').value.trim();
+  if (!myId) { log('⚠️ Enter your ID first', 'warn'); return; }
+  try {
+    const r = await fetch(getRelay() + '/signal?id=' + myId);
+    const d = await r.json();
+    if (d.signals && d.signals.length > 0) {
+      log(`📥 Got ${d.signals.length} signal(s)`, 'ok');
+      for (const item of d.signals) {
+        log(`  → ${item.signal.type} from ${item.fromId}`, 'info');
+        await handleSignal(item.fromId, item.signal);
+      }
+    } else {
+      log('📭 No pending signals', 'gray');
+    }
+  } catch(e) { log('❌ Poll error: ' + e.message, 'err'); }
+}
+
+async function handleSignal(fromId, signal) {
+  log(`🔔 Handling: ${signal.type}`, 'info');
+  if (signal.type === 'offer') {
+    theirId = fromId;
+    $('theirId').value = fromId;
+    log(`📞 Incoming ${signal.callType||'audio'} call from ${fromId}`, 'warn');
+    if (confirm(`Incoming call from ${fromId}. Answer?`)) {
+      await answerCall(fromId, signal);
+    } else {
+      await sendSignal(fromId, { type:'reject' });
+    }
+  }
+  if (signal.type === 'answer' && pc) {
+    log('📋 Setting remote description (answer)', 'info');
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription({ type:'answer', sdp:signal.sdp }));
+      log('✅ Remote description set', 'ok');
+    } catch(e) { log('❌ setRemoteDescription failed: ' + e.message, 'err'); }
+  }
+  if (signal.type === 'ice' && pc) {
+    const candidates = signal.candidates || (signal.candidate ? [signal.candidate] : []);
+    for (const c of candidates) {
+      try { await pc.addIceCandidate(new RTCIceCandidate(c)); log('🧊 ICE added', 'ok'); }
+      catch(e) { log('❌ ICE failed: ' + e.message, 'err'); }
+    }
+  }
+  if (signal.type === 'hangup') { log('📵 Remote hung up', 'warn'); hangup(); }
+  if (signal.type === 'reject') { log('❌ Call rejected', 'err'); hangup(); }
+}
+
+const ICE = { iceServers:[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'},
+  {urls:'turn:openrelay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turn:openrelay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
+]};
+
+function createPC() {
+  pc = new RTCPeerConnection(ICE);
+  const remoteStream = new MediaStream();
+  $('remoteVideo').srcObject = remoteStream;
+
+  pc.ontrack = e => {
+    log('🎥 Remote track received: ' + e.track.kind, 'ok');
+    e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
+  };
+
+  let batch = [], batchTimer = null;
+  pc.onicecandidate = e => {
+    if (!e.candidate) { log('🧊 ICE gathering complete', 'ok'); return; }
+    log('🧊 ICE candidate: ' + e.candidate.type, 'gray');
+    batch.push(e.candidate);
+    clearTimeout(batchTimer);
+    batchTimer = setTimeout(async () => {
+      await sendSignal($('theirId').value.trim(), { type:'ice', candidates: batch });
+      batch = [];
+    }, 200);
+  };
+
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    const t = {connected:'ok', failed:'err', disconnected:'warn', connecting:'info', closed:'err', new:'gray'}[s]||'info';
+    log(`🔗 Connection: ${s}`, t);
+  };
+  pc.oniceconnectionstatechange = () => {
+    const s = pc.iceConnectionState;
+    log(`🧊 ICE: ${s}`, s==='connected'||s==='completed'?'ok':s==='failed'?'err':'info');
+  };
+  pc.onsignalingstatechange = () => {
+    log(`📡 Signaling: ${pc.signalingState}`, 'gray');
+  };
+  return pc;
+}
+
+async function getMedia(type) {
+  log(`🎤 Getting ${type} media...`, 'info');
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:true},
+      video: type==='video' ? {facingMode:'user',width:{ideal:640}} : false
+    });
+    $('localVideo').srcObject = localStream;
+    log(`✅ Media obtained — tracks: ${localStream.getTracks().map(t=>t.kind).join(',')}`, 'ok');
+    return localStream;
+  } catch(e) {
+    log(`❌ Media error: ${e.name}: ${e.message}`, 'err');
+    throw e;
+  }
+}
+
+async function startCall(type) {
+  myId    = $('myId').value.trim();
+  theirId = $('theirId').value.trim();
+  if (!myId || !theirId) { log('⚠️ Enter both IDs', 'warn'); return; }
+  log(`📞 Starting ${type} call to ${theirId}`, 'info');
+  try {
+    await getMedia(type);
+    createPC();
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:type==='video' });
+    await pc.setLocalDescription(offer);
+    log('📋 Local description set (offer)', 'ok');
+
+    await sendSignal(theirId, { type:'offer', sdp:offer.sdp, callType:type });
+    log('📤 Offer sent — waiting for answer...', 'info');
+
+    startPolling();
+  } catch(e) { log('❌ Call failed: ' + e.message, 'err'); }
+}
+
+async function answerCall(fromId, signal) {
+  theirId = fromId;
+  const type = signal.callType || 'audio';
+  log(`✅ Answering ${type} call`, 'info');
+  try {
+    await getMedia(type);
+    createPC();
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    await pc.setRemoteDescription(new RTCSessionDescription({ type:'offer', sdp:signal.sdp }));
+    log('📋 Remote description set (offer)', 'ok');
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    log('📋 Local description set (answer)', 'ok');
+
+    await sendSignal(fromId, { type:'answer', sdp:answer.sdp });
+    log('📤 Answer sent', 'ok');
+
+    startPolling();
+  } catch(e) { log('❌ Answer failed: ' + e.message, 'err'); }
+}
+
+function startPolling() {
+  if (polling) return;
+  log('📡 Polling for signals every 800ms', 'gray');
+  polling = setInterval(pollSignals, 800);
+}
+
+function hangup() {
+  clearInterval(polling); polling = null;
+  localStream?.getTracks().forEach(t => t.stop());
+  pc?.close(); pc = null; localStream = null;
+  $('localVideo').srcObject  = null;
+  $('remoteVideo').srcObject = null;
+  log('📵 Call ended', 'warn');
+}
+
+// Auto-poll if ID entered
+$('myId').addEventListener('blur', () => {
+  if ($('myId').value && !polling) {
+    log('👂 Listening for calls...', 'gray');
+    polling = setInterval(pollSignals, 2000);
+  }
+});
+
+log('👋 Enter your ID and click Test Relay to start', 'gray');
+</script>
+</body>
+</html>
