@@ -2,289 +2,306 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Uraiadal Call Debug</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Uraiadal Call Debug v3</title>
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:#0A0A0F; color:#F0F0FF; font-family:'DM Sans',sans-serif; padding:16px; }
-h1 { color:#6C63FF; margin-bottom:16px; font-size:18px; }
-.section { background:#141420; border:1px solid #2A2A3E; border-radius:12px; padding:14px; margin-bottom:12px; }
-.section h2 { font-size:13px; color:#7B7B9A; margin-bottom:10px; text-transform:uppercase; letter-spacing:1px; }
-input { width:100%; background:#0A0A0F; border:1px solid #2A2A3E; border-radius:8px; padding:10px; color:#F0F0FF; font-size:13px; margin-bottom:8px; outline:none; font-family:monospace; }
-button { padding:10px 16px; border-radius:10px; border:none; cursor:pointer; font-size:13px; font-weight:600; margin:4px 4px 4px 0; }
-.btn-p { background:#6C63FF; color:#fff; }
-.btn-g { background:#00D9A5; color:#000; }
-.btn-r { background:#FF4F6B; color:#fff; }
-.btn-y { background:#FFB347; color:#000; }
-#log { background:#070710; border:1px solid #1A1A2E; border-radius:10px; padding:12px; height:300px; overflow-y:auto; font-family:monospace; font-size:11px; line-height:1.6; }
-.log-ok  { color:#00D9A5; }
-.log-err { color:#FF4F6B; }
-.log-warn{ color:#FFB347; }
-.log-info{ color:#6C63FF; }
-.log-gray{ color:#7B7B9A; }
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#0A0A0F;color:#F0F0FF;font-family:monospace;padding:12px;font-size:12px;}
+h1{color:#6C63FF;margin-bottom:12px;font-size:16px;}
+input{width:100%;background:#141420;border:1px solid #2A2A3E;border-radius:8px;padding:9px;color:#F0F0FF;font-size:12px;margin-bottom:6px;outline:none;}
+button{padding:10px 14px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:700;margin:3px;}
+.bp{background:#6C63FF;color:#fff;}
+.bg{background:#00D9A5;color:#000;}
+.br{background:#FF4F6B;color:#fff;}
+.by{background:#FFB347;color:#000;}
+.bw{background:#1E1E2E;color:#7B7B9A;}
+#log{background:#050510;border:1px solid #1A1A2E;border-radius:8px;padding:10px;height:380px;overflow-y:auto;margin:10px 0;line-height:1.8;}
+.ok{color:#00D9A5;}.er{color:#FF4F6B;}.wa{color:#FFB347;}.in{color:#6C63FF;}.gr{color:#555;}
+video{width:49%;background:#141420;border-radius:6px;border:1px solid #2A2A3E;}
+.vids{display:flex;gap:4px;margin-top:8px;}
 </style>
 </head>
 <body>
-<h1>🔐 Uraiadal Call Debugger</h1>
+<h1>🔐 Call Debugger v3</h1>
 
-<div class="section">
-  <h2>Config</h2>
-  <input id="relayUrl" value="https://uraiadal-relay.nrudheen3.workers.dev" placeholder="Relay URL">
-  <input id="myId" placeholder="Your ID (e.g. urai_xxxxxxxxxx)">
-  <input id="theirId" placeholder="Their ID (e.g. urai_xxxxxxxxxx)">
+<input id="relay" value="https://uraiadal-relay.nrudheen3.workers.dev">
+<input id="myId" placeholder="Your ID: urai_xxxxxxxxxx">
+<input id="theirId" placeholder="Their ID: urai_xxxxxxxxxx">
+
+<div>
+<button class="bp" onclick="testRelay()">🔍 Test</button>
+<button class="bg" onclick="doCall('audio')">📞 Call</button>
+<button class="bg" onclick="doCall('video')">📹 Video</button>
+<button class="by" onclick="poll()">📡 Poll</button>
+<button class="br" onclick="doHangup()">📵 End</button>
+<button class="bw" onclick="log2('','gr');$('log').innerHTML=''">🗑</button>
 </div>
 
-<div class="section">
-  <h2>Actions</h2>
-  <button class="btn-p" onclick="testRelay()">🔍 Test Relay</button>
-  <button class="btn-g" onclick="startCall('audio')">📞 Voice Call</button>
-  <button class="btn-g" onclick="startCall('video')">📹 Video Call</button>
-  <button class="btn-y" onclick="pollSignals()">📡 Poll Signals</button>
-  <button class="btn-r" onclick="hangup()">📵 Hangup</button>
-  <button onclick="clearLog()" style="background:#1A1A2E;color:#7B7B9A">🗑 Clear</button>
-</div>
+<div id="log"><div class="gr">[ready] Enter IDs and tap Test</div></div>
 
-<div class="section">
-  <h2>Log</h2>
-  <div id="log"></div>
-</div>
-
-<div class="section">
-  <h2>Media</h2>
-  <div style="display:flex;gap:8px">
-    <video id="localVideo"  autoplay playsinline muted style="width:48%;background:#1A1A2E;border-radius:8px;min-height:120px"></video>
-    <video id="remoteVideo" autoplay playsinline      style="width:48%;background:#1A1A2E;border-radius:8px;min-height:120px"></video>
-  </div>
-  <p style="font-size:11px;color:#555;margin-top:6px">Local (left) · Remote (right)</p>
+<div class="vids">
+  <video id="lv" autoplay playsinline muted></video>
+  <video id="rv" autoplay playsinline></video>
 </div>
 
 <script>
-const $ = id => document.getElementById(id);
-let pc = null, localStream = null, polling = null, myId = null, theirId = null;
+const $=id=>document.getElementById(id);
+let pc=null,ls=null,polling=null,myId=null,theirId=null,offerSent=false;
 
-function log(msg, type='info') {
-  const d = $('log');
-  const t = new Date().toLocaleTimeString();
-  const cls = {ok:'log-ok',err:'log-err',warn:'log-warn',info:'log-info',gray:'log-gray'}[type]||'log-info';
-  d.innerHTML += `<div class="${cls}">[${t}] ${msg}</div>`;
-  d.scrollTop = d.scrollHeight;
-}
-function clearLog() { $('log').innerHTML = ''; }
-
-function getRelay() { return $('relayUrl').value.trim(); }
-
-async function testRelay() {
-  log('Testing relay...', 'info');
-  try {
-    const r = await fetch(getRelay() + '/health');
-    const d = await r.json();
-    log(`✅ Relay OK — version ${d.version}`, 'ok');
-  } catch(e) { log('❌ Relay unreachable: ' + e.message, 'err'); }
+function t(){return new Date().toTimeString().slice(0,8);}
+function log2(msg,cls='in'){
+  const d=$('log');
+  d.innerHTML+=`<div class="${cls}">[${t()}] ${msg}</div>`;
+  d.scrollTop=d.scrollHeight;
 }
 
-async function sendSignal(toId, signal) {
-  const fromId = $('myId').value.trim();
-  try {
-    const r = await fetch(getRelay() + '/signal', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ fromId, toId, signal })
-    });
-    const d = await r.json();
-    if (d.success) log(`📤 Signal sent: ${signal.type}`, 'ok');
-    else log(`❌ Signal failed: ${JSON.stringify(d)}`, 'err');
-  } catch(e) { log('❌ sendSignal error: ' + e.message, 'err'); }
-}
-
-async function pollSignals() {
-  myId = $('myId').value.trim();
-  if (!myId) { log('⚠️ Enter your ID first', 'warn'); return; }
-  try {
-    const r = await fetch(getRelay() + '/signal?id=' + myId);
-    const d = await r.json();
-    if (d.signals && d.signals.length > 0) {
-      log(`📥 Got ${d.signals.length} signal(s)`, 'ok');
-      for (const item of d.signals) {
-        log(`  → ${item.signal.type} from ${item.fromId}`, 'info');
-        await handleSignal(item.fromId, item.signal);
-      }
-    } else {
-      log('📭 No pending signals', 'gray');
-    }
-  } catch(e) { log('❌ Poll error: ' + e.message, 'err'); }
-}
-
-async function handleSignal(fromId, signal) {
-  log(`🔔 Handling: ${signal.type}`, 'info');
-  if (signal.type === 'offer') {
-    theirId = fromId;
-    $('theirId').value = fromId;
-    log(`📞 Incoming ${signal.callType||'audio'} call from ${fromId}`, 'warn');
-    if (confirm(`Incoming call from ${fromId}. Answer?`)) {
-      await answerCall(fromId, signal);
-    } else {
-      await sendSignal(fromId, { type:'reject' });
-    }
-  }
-  if (signal.type === 'answer' && pc) {
-    log('📋 Setting remote description (answer)', 'info');
-    try {
-      await pc.setRemoteDescription(new RTCSessionDescription({ type:'answer', sdp:signal.sdp }));
-      log('✅ Remote description set', 'ok');
-    } catch(e) { log('❌ setRemoteDescription failed: ' + e.message, 'err'); }
-  }
-  if (signal.type === 'ice' && pc) {
-    const candidates = signal.candidates || (signal.candidate ? [signal.candidate] : []);
-    for (const c of candidates) {
-      try { await pc.addIceCandidate(new RTCIceCandidate(c)); log('🧊 ICE added', 'ok'); }
-      catch(e) { log('❌ ICE failed: ' + e.message, 'err'); }
-    }
-  }
-  if (signal.type === 'hangup') { log('📵 Remote hung up', 'warn'); hangup(); }
-  if (signal.type === 'reject') { log('❌ Call rejected', 'err'); hangup(); }
-}
-
-const ICE = { iceServers:[
+const ICE={iceServers:[
   {urls:'stun:stun.l.google.com:19302'},
   {urls:'stun:stun1.l.google.com:19302'},
+  {urls:'stun:stun2.l.google.com:19302'},
   {urls:'turn:openrelay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
   {urls:'turn:openrelay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turn:openrelay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'},
 ]};
 
-function createPC() {
-  pc = new RTCPeerConnection(ICE);
-  const remoteStream = new MediaStream();
-  $('remoteVideo').srcObject = remoteStream;
+async function testRelay(){
+  log2('Testing relay...','in');
+  try{
+    const r=await fetch($('relay').value+'/health');
+    const d=await r.json();
+    log2(`✅ Relay OK — v${d.version}`,'ok');
+    // Test signal endpoint
+    const r2=await fetch($('relay').value+'/signal?id=urai_test123');
+    const d2=await r2.json();
+    log2(`✅ Signal endpoint OK — ${JSON.stringify(d2)}`,'ok');
+  }catch(e){log2('❌ Relay error: '+e.message,'er');}
+}
 
-  pc.ontrack = e => {
-    log('🎥 Remote track received: ' + e.track.kind, 'ok');
-    e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
-  };
+async function sendSig(toId,signal){
+  const from=$('myId').value.trim();
+  log2(`📤 Sending signal: ${signal.type} → ${toId.slice(0,16)}`,'in');
+  try{
+    const r=await fetch($('relay').value+'/signal',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fromId:from,toId,signal})
+    });
+    const d=await r.json();
+    if(d.success) log2(`✅ Signal sent: ${signal.type}`,'ok');
+    else log2(`❌ Signal FAILED: ${JSON.stringify(d)}`,'er');
+    return d.success;
+  }catch(e){log2('❌ Send error: '+e.message,'er');return false;}
+}
 
-  let batch = [], batchTimer = null;
-  pc.onicecandidate = e => {
-    if (!e.candidate) { log('🧊 ICE gathering complete', 'ok'); return; }
-    log('🧊 ICE candidate: ' + e.candidate.type, 'gray');
-    // toJSON() converts RTCIceCandidate to plain serializable object
-    batch.push(e.candidate.toJSON ? e.candidate.toJSON() : e.candidate);
-    clearTimeout(batchTimer);
-    batchTimer = setTimeout(async () => {
-      if (batch.length > 0) {
-        log('📤 Sending ' + batch.length + ' ICE candidate(s)', 'info');
-        await sendSignal($('theirId').value.trim(), { type:'ice', candidates: batch });
-        batch = [];
+async function poll(){
+  myId=$('myId').value.trim();
+  if(!myId){log2('⚠️ Enter your ID','wa');return;}
+  try{
+    const r=await fetch($('relay').value+'/signal?id='+myId);
+    const d=await r.json();
+    if(d.signals&&d.signals.length>0){
+      log2(`📥 Got ${d.signals.length} signal(s)`,'ok');
+      for(const item of d.signals){
+        log2(`  → type:${item.signal.type} from:${item.fromId.slice(0,16)}`,'ok');
+        await handleSig(item.fromId,item.signal);
       }
-    }, 200);
+    }
+  }catch(e){log2('Poll error: '+e.message,'er');}
+}
+
+async function handleSig(fromId,sig){
+  log2(`🔔 Handle: ${sig.type} from ${fromId.slice(0,16)}`,'wa');
+  
+  if(sig.type==='offer'){
+    theirId=fromId;$('theirId').value=fromId;
+    log2(`📞 Incoming ${sig.callType||'audio'} call!`,'wa');
+    if(confirm(`Incoming call from ${fromId.slice(0,16)}\nAnswer?`)){
+      await doAnswer(fromId,sig);
+    }else{
+      await sendSig(fromId,{type:'reject'});
+    }
+    return;
+  }
+  
+  if(sig.type==='answer'&&pc){
+    log2('📋 Got answer — setting remote desc','in');
+    try{
+      await pc.setRemoteDescription(new RTCSessionDescription({type:'answer',sdp:sig.sdp}));
+      log2('✅ Remote desc set (answer)','ok');
+    }catch(e){log2('❌ setRemoteDesc answer: '+e.message,'er');}
+    return;
+  }
+  
+  if(sig.type==='ice'&&pc){
+    const cs=sig.candidates||(sig.candidate?[sig.candidate]:[]);
+    log2(`🧊 Adding ${cs.length} ICE candidates`,'in');
+    for(const c of cs){
+      try{
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+        log2(`  ✅ ICE added: ${c.candidate?c.candidate.split(' ')[7]||'?':'?'}`,'ok');
+      }catch(e){log2('  ❌ ICE fail: '+e.message,'er');}
+    }
+    return;
+  }
+  
+  if(sig.type==='hangup'){log2('📵 Remote hung up','wa');doHangup();return;}
+  if(sig.type==='reject'){log2('❌ Call rejected','er');doHangup();return;}
+}
+
+function makePC(){
+  if(pc){pc.close();pc=null;}
+  log2('🔧 Creating RTCPeerConnection','gr');
+  pc=new RTCPeerConnection(ICE);
+  const rs=new MediaStream();
+  $('rv').srcObject=rs;
+  
+  pc.ontrack=e=>{
+    log2(`🎵 Remote track: ${e.track.kind}`,'ok');
+    e.streams[0]?.getTracks().forEach(t=>rs.addTrack(t));
+  };
+  
+  pc.onicecandidate=e=>{
+    if(!e.candidate){log2('🧊 ICE gathering complete','ok');return;}
+    log2(`🧊 ICE: ${e.candidate.type} / ${e.candidate.protocol}`,'gr');
+  };
+  
+  pc.onconnectionstatechange=()=>{
+    const s=pc.connectionState;
+    const c={connected:'ok',failed:'er',disconnected:'wa',connecting:'in',new:'gr',closed:'er'}[s]||'in';
+    log2(`🔗 Connection: ${s}`,c);
+  };
+  
+  pc.oniceconnectionstatechange=()=>{
+    const s=pc.iceConnectionState;
+    const c={connected:'ok',completed:'ok',failed:'er',disconnected:'wa',checking:'in',new:'gr'}[s]||'in';
+    log2(`🧊 ICE state: ${s}`,c);
+  };
+  
+  pc.onsignalingstatechange=()=>{
+    log2(`📡 Signaling: ${pc.signalingState}`,'gr');
   };
 
-  pc.onconnectionstatechange = () => {
-    const s = pc.connectionState;
-    const t = {connected:'ok', failed:'err', disconnected:'warn', connecting:'info', closed:'err', new:'gray'}[s]||'info';
-    log(`🔗 Connection: ${s}`, t);
+  pc.onicegatheringstatechange=()=>{
+    log2(`🧊 Gathering: ${pc.iceGatheringState}`,'gr');
   };
-  pc.oniceconnectionstatechange = () => {
-    const s = pc.iceConnectionState;
-    log(`🧊 ICE: ${s}`, s==='connected'||s==='completed'?'ok':s==='failed'?'err':'info');
-  };
-  pc.onsignalingstatechange = () => {
-    log(`📡 Signaling: ${pc.signalingState}`, 'gray');
-  };
+  
   return pc;
 }
 
-async function getMedia(type) {
-  log(`🎤 Getting ${type} media...`, 'info');
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({
+async function getMedia(type){
+  log2(`🎤 Requesting ${type} media...`,'in');
+  try{
+    ls=await navigator.mediaDevices.getUserMedia({
       audio:{echoCancellation:true,noiseSuppression:true},
-      video: type==='video' ? {facingMode:'user',width:{ideal:640}} : false
+      video:type==='video'?{facingMode:'user',width:{ideal:640}}:false
     });
-    $('localVideo').srcObject = localStream;
-    log(`✅ Media obtained — tracks: ${localStream.getTracks().map(t=>t.kind).join(',')}`, 'ok');
-    return localStream;
-  } catch(e) {
-    log(`❌ Media error: ${e.name}: ${e.message}`, 'err');
+    $('lv').srcObject=ls;
+    log2(`✅ Got media: ${ls.getTracks().map(t=>t.kind).join(',')}`,'ok');
+    return ls;
+  }catch(e){
+    log2(`❌ Media FAILED: ${e.name}: ${e.message}`,'er');
     throw e;
   }
 }
 
-async function startCall(type) {
-  myId    = $('myId').value.trim();
-  theirId = $('theirId').value.trim();
-  if (!myId || !theirId) { log('⚠️ Enter both IDs', 'warn'); return; }
-  log(`📞 Starting ${type} call to ${theirId}`, 'info');
-  try {
-    await getMedia(type);
-    createPC();
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+async function waitICE(){
+  return new Promise(res=>{
+    if(pc.iceGatheringState==='complete'){res();return;}
+    log2('⏳ Waiting for ICE gathering...','gr');
+    const t=setTimeout(()=>{log2('⏰ ICE timeout (2s) — proceeding','wa');res();},2000);
+    pc.onicegatheringstatechange=()=>{
+      if(pc.iceGatheringState==='complete'){
+        log2('✅ ICE gathering complete','ok');
+        clearTimeout(t);res();
+      }
+    };
+  });
+}
 
-    const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:type==='video' });
+async function doCall(type){
+  myId=$('myId').value.trim();
+  theirId=$('theirId').value.trim();
+  if(!myId||!theirId){log2('⚠️ Enter both IDs','wa');return;}
+  if(pc){log2('⚠️ Already in a call','wa');return;}
+  
+  log2(`📞 Calling ${theirId.slice(0,16)} (${type})...`,'in');
+  try{
+    await getMedia(type);
+    makePC();
+    ls.getTracks().forEach(t=>pc.addTrack(t,ls));
+    
+    log2('📋 Creating offer...','in');
+    const offer=await pc.createOffer({offerToReceiveAudio:true,offerToReceiveVideo:type==='video'});
     await pc.setLocalDescription(offer);
-    log('📋 Local description set (offer)', 'ok');
-
-    await sendSignal(theirId, { type:'offer', sdp:offer.sdp, callType:type });
-    log('📤 Offer sent — waiting for answer...', 'info');
-
-    startPolling();
-  } catch(e) { log('❌ Call failed: ' + e.message, 'err'); }
+    log2('✅ Local desc set (offer)','ok');
+    
+    await waitICE();
+    
+    // Send final SDP (includes ICE candidates)
+    const finalSDP=pc.localDescription.sdp;
+    log2(`📤 Sending offer (SDP length: ${finalSDP.length})...`,'in');
+    const ok=await sendSig(theirId,{type:'offer',sdp:finalSDP,callType:type});
+    
+    if(ok){
+      log2('✅ Offer sent! Starting poll for answer...','ok');
+      startPoll();
+    }
+  }catch(e){log2('❌ Call error: '+e.message,'er');doHangup();}
 }
 
-async function answerCall(fromId, signal) {
-  theirId = fromId;
-  const type = signal.callType || 'audio';
-  log(`✅ Answering ${type} call`, 'info');
-  try {
+async function doAnswer(fromId,sig){
+  const type=sig.callType||'audio';
+  log2(`📲 Answering ${type} call from ${fromId.slice(0,16)}`,'in');
+  try{
     await getMedia(type);
-    createPC();
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-    await pc.setRemoteDescription(new RTCSessionDescription({ type:'offer', sdp:signal.sdp }));
-    log('📋 Remote description set (offer)', 'ok');
-
-    const answer = await pc.createAnswer();
+    makePC();
+    ls.getTracks().forEach(t=>pc.addTrack(t,ls));
+    
+    log2('📋 Setting remote desc (offer)...','in');
+    await pc.setRemoteDescription(new RTCSessionDescription({type:'offer',sdp:sig.sdp}));
+    log2('✅ Remote desc set (offer)','ok');
+    
+    log2('📋 Creating answer...','in');
+    const answer=await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    log('📋 Local description set (answer)', 'ok');
-
-    // Wait for ICE gathering then send answer with ICE embedded
-    log('🧊 Gathering ICE candidates...', 'gray');
-    await new Promise(res => {
-      if (pc.iceGatheringState === 'complete') { res(); return; }
-      const t = setTimeout(res, 2000);
-      pc.onicegatheringstatechange = () => {
-        if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); }
-      };
-    });
-    log('🧊 ICE done — sending answer with ICE embedded', 'ok');
-    await sendSignal(fromId, { type:'answer', sdp:pc.localDescription.sdp });
-    log('📤 Answer sent (with ICE embedded in SDP)', 'ok');
-    startPolling();
-  } catch(e) { log('❌ Answer failed: ' + e.message, 'err'); }
+    log2('✅ Local desc set (answer)','ok');
+    
+    await waitICE();
+    
+    const finalSDP=pc.localDescription.sdp;
+    log2(`📤 Sending answer (SDP: ${finalSDP.length})...`,'in');
+    await sendSig(fromId,{type:'answer',sdp:finalSDP});
+    log2('✅ Answer sent! Waiting for connection...','ok');
+    
+    startPoll();
+  }catch(e){log2('❌ Answer error: '+e.message,'er');doHangup();}
 }
 
-function startPolling() {
-  if (polling) return;
-  log('📡 Polling for signals every 800ms', 'gray');
-  polling = setInterval(pollSignals, 800);
+function startPoll(){
+  if(polling)return;
+  log2('📡 Auto-polling every 1s','gr');
+  polling=setInterval(poll,1000);
 }
 
-function hangup() {
-  clearInterval(polling); polling = null;
-  localStream?.getTracks().forEach(t => t.stop());
-  pc?.close(); pc = null; localStream = null;
-  $('localVideo').srcObject  = null;
-  $('remoteVideo').srcObject = null;
-  log('📵 Call ended', 'warn');
+function doHangup(){
+  clearInterval(polling);polling=null;
+  if(theirId&&myId) sendSig(theirId,{type:'hangup'}).catch(()=>{});
+  ls?.getTracks().forEach(t=>t.stop());
+  pc?.close();pc=null;ls=null;
+  $('lv').srcObject=null;$('rv').srcObject=null;
+  log2('📵 Ended','wa');
 }
 
-// Auto-poll if ID entered
-$('myId').addEventListener('blur', () => {
-  if ($('myId').value && !polling) {
-    log('👂 Listening for calls...', 'gray');
-    polling = setInterval(pollSignals, 2000);
+// Auto-listen for incoming calls
+let listenTimer=null;
+$('myId').addEventListener('change',()=>{
+  clearInterval(listenTimer);
+  const id=$('myId').value.trim();
+  if(id.startsWith('urai_')){
+    log2('👂 Listening for calls...','gr');
+    listenTimer=setInterval(poll,2000);
   }
 });
-
-log('👋 Enter your ID and click Test Relay to start', 'gray');
 </script>
 </body>
 </html>
